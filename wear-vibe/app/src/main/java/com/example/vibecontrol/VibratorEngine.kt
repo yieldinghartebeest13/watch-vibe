@@ -150,6 +150,9 @@ class VibratorEngine(context: Context) {
             }
 
             AppConstants.MODE_BURST -> {
+                // Legacy binary API (no amplitudes) — the amplitude API creates
+                // artifacts with taps shorter than ~50ms because the motor
+                // controller ramps amplitude transitions, eating into the tap.
                 val (tap, pause) = when (level.coerceIn(0, 3)) {
                     0 -> 140L to 300L
                     1 -> 90L to 195L
@@ -157,11 +160,11 @@ class VibratorEngine(context: Context) {
                     3 -> 35L to 75L
                     else -> 140L to 300L
                 }
-                val timings = longArrayOf(tap, tap, tap, tap, tap, pause)
-                val amplitudes = intArrayOf(255, 0, 255, 0, 255, 0)
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
+                // Legacy format: [wait, ON, OFF, ON, OFF, ON, OFF-pause]
+                val pattern = longArrayOf(0L, tap, tap, tap, tap, tap, pause)
+                val scaled = scalePowerLegacy(pattern, currentIntensity)
                 isActive = true
-                vibrate(t, a)
+                vibrateLegacy(scaled)
             }
 
             AppConstants.MODE_WAVE -> {

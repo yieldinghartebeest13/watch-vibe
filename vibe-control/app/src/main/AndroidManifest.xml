@@ -8,7 +8,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="VibeControl"
         android:supportsRtl="true"
-        android:theme="@style/Theme.MaterialComponents.DayNight.DarkActionBar">
+        android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
 
         <activity
             android:name=".MainActivity"
