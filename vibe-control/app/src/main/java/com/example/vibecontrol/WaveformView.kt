@@ -96,16 +96,15 @@ class WaveformView @JvmOverloads constructor(
                 path.lineTo(w, y)
             }
             AppConstants.MODE_INTERMITTENT -> {
-                val pulseCount = if (level == 0) 1 else 2
-                val pulseWidth = w / (pulseCount * 2)
-                for (i in 0 until pulseCount) {
-                    val x1 = i * pulseWidth * 2
-                    val x2 = x1 + pulseWidth * 1.4f
-                    path.moveTo(x1, h * 0.6f)
-                    path.lineTo(x1, h * 0.1f)
-                    path.lineTo(x2, h * 0.1f)
-                    path.lineTo(x2, h * 0.6f)
-                }
+                // Waveform shape is speed-independent: always shows the
+                // characteristic 70% duty-cycle pulse, not more pulses
+                // at higher speeds.
+                val pulseWidth = w / 2f
+                val x2 = pulseWidth * 1.4f
+                path.moveTo(0f, h * 0.6f)
+                path.lineTo(0f, h * 0.1f)
+                path.lineTo(x2, h * 0.1f)
+                path.lineTo(x2, h * 0.6f)
                 path.lineTo(w, h * 0.6f)
             }
             AppConstants.MODE_RAMP -> {
