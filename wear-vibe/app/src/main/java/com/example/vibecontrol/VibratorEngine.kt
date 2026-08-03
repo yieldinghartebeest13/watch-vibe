@@ -32,22 +32,6 @@ import android.content.Context
  */
 class VibratorEngine(context: Context) {
 
-    companion object {
-        const val MODE_CONSTANT = 0
-        const val MODE_INTERMITTENT = 1
-        const val MODE_RAMP = 2
-        const val MODE_BURST = 3
-        const val MODE_WAVE = 4
-        const val MODE_RANDOM = 5
-        const val MODE_STOP = -2
-        const val MODE_PAUSE = -3
-
-        const val LEVEL_SLOW = 0
-        const val LEVEL_MEDIUM = 1
-        const val LEVEL_FAST = 2
-        const val LEVEL_VERY_FAST = 3
-    }
-
     private val vibratorManager: VibratorManager? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -60,8 +44,8 @@ class VibratorEngine(context: Context) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
-    private var currentMode: Int = MODE_PAUSE
-    private var currentLevel: Int = LEVEL_SLOW
+    private var currentMode: Int = AppConstants.MODE_PAUSE
+    private var currentLevel: Int = AppConstants.LEVEL_SLOW
     private var currentIntensity: Int = 100
     private var isActive: Boolean = false
 
@@ -75,7 +59,7 @@ class VibratorEngine(context: Context) {
     @Synchronized
     fun cancel() {
         isActive = false
-        currentMode = MODE_PAUSE
+        currentMode = AppConstants.MODE_PAUSE
 
         // 1. Cancel via VibratorManager (API 31+) — cancels ALL vibrators
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -124,12 +108,12 @@ class VibratorEngine(context: Context) {
         currentIntensity = intensity
 
         when (mode) {
-            MODE_STOP, MODE_PAUSE -> {
+            AppConstants.MODE_STOP, AppConstants.MODE_PAUSE -> {
                 cancel()
                 return
             }
 
-            MODE_CONSTANT -> {
+            AppConstants.MODE_CONSTANT -> {
                 val timings = longArrayOf(5000)
                 val amplitudes = intArrayOf(255)
                 val (t, a) = scalePower(timings, amplitudes, currentIntensity)
@@ -137,7 +121,7 @@ class VibratorEngine(context: Context) {
                 vibrate(t, a)
             }
 
-            MODE_INTERMITTENT -> {
+            AppConstants.MODE_INTERMITTENT -> {
                 // 70% on / 30% off duty cycle. Cycle target: 1000ms (level 0)
                 val (on, off) = when (level.coerceIn(0, 3)) {
                     0 -> 700L to 300L
@@ -153,7 +137,7 @@ class VibratorEngine(context: Context) {
                 vibrate(t, a)
             }
 
-            MODE_RAMP -> {
+            AppConstants.MODE_RAMP -> {
                 val count = 5
                 val stepMs = when (level.coerceIn(0, 3)) {
                     0 -> 200L; 1 -> 130L; 2 -> 80L; 3 -> 50L; else -> 200L
@@ -165,7 +149,7 @@ class VibratorEngine(context: Context) {
                 vibrate(t, a)
             }
 
-            MODE_BURST -> {
+            AppConstants.MODE_BURST -> {
                 val (tap, pause) = when (level.coerceIn(0, 3)) {
                     0 -> 140L to 300L
                     1 -> 90L to 195L
@@ -180,7 +164,7 @@ class VibratorEngine(context: Context) {
                 vibrate(t, a)
             }
 
-            MODE_WAVE -> {
+            AppConstants.MODE_WAVE -> {
                 // Cycle target: 1000ms (level 0), 20 steps
                 val steps = 20
                 val stepMs = when (level.coerceIn(0, 3)) {
@@ -196,7 +180,7 @@ class VibratorEngine(context: Context) {
                 vibrate(t, a)
             }
 
-            MODE_RANDOM -> {
+            AppConstants.MODE_RANDOM -> {
                 // Long pattern (30 steps) — loop is long enough to feel unpredictable.
                 val count = 30
                 val (minMs, maxMs) = when (level.coerceIn(0, 3)) {
@@ -219,10 +203,6 @@ class VibratorEngine(context: Context) {
      * Play a one-shot custom waveform for real-time manual control.
      * Does NOT loop — plays once and stops. Does not change currentMode.
      * Use for external pattern editors / live control surfaces.
-     *
-     * @param timings alternating [wait, on, off, on, ...] in ms (same format
-     *                as Android VibrationEffect timings)
-     * @param repeat index into timings to loop from, or -1 to play once
      */
     fun vibratePulse(timings: LongArray, repeat: Int = -1) {
         if (!vibrator.hasVibrator()) return
@@ -270,14 +250,12 @@ class VibratorEngine(context: Context) {
                 vibrator.vibrate(effect)
             }
         } else {
-            // Pre-API 26: unreachable on Wear OS 5+ (API 34+). Use no-op fallback.
             @Suppress("DEPRECATION")
             vibrator.vibrate(longArrayOf(0), -1)
         }
     }
 
-    /** Legacy vibrate using binary on/off pattern (no amplitudes).
-     * Used for Burst mode where the amplitude API creates artifacts. */
+    /** Legacy vibrate using binary on/off pattern (no amplitudes). */
     private fun vibrateLegacy(pattern: LongArray) {
         if (!vibrator.hasVibrator()) return
 

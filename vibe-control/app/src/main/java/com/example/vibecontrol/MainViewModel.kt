@@ -3,6 +3,7 @@ package com.example.vibecontrol
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.tasks.await
@@ -15,20 +16,9 @@ import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    companion object {
-        const val MODE_STOP = -2
-        const val MODE_PAUSE = -3
-        const val MODE_CONSTANT = 0
-        const val MODE_INTERMITTENT = 1
-        const val MODE_RAMP = 2
-        const val MODE_BURST = 3
-        const val MODE_WAVE = 4
-        const val MODE_RANDOM = 5
-    }
-
     private val wearDataLayer = WearDataLayer(application)
 
-    private val _mode = MutableStateFlow(MODE_PAUSE)
+    private val _mode = MutableStateFlow(AppConstants.MODE_PAUSE)
     val mode: StateFlow<Int> = _mode.asStateFlow()
 
     private val _level = MutableStateFlow(0)
@@ -48,12 +38,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
+    private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
 
     fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = viewModelScope.launch {
             while (isActive) {
-                delay(1000)
+                delay(AppConstants.HEARTBEAT_INTERVAL_MS)
                 wearDataLayer.sendPing()
             }
         }
@@ -73,22 +64,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val connected = wearDataLayer.isWearConnected()
             _watchConnected.value = connected
             if (connected) {
-                // Send wake-up in case the watch app was killed
                 wearDataLayer.sendWakeUp()
             }
         }
 
         // Listener for real-time changes
+        val listener = CapabilityClient.OnCapabilityChangedListener { capInfo ->
+            val connected = capInfo.nodes.isNotEmpty()
+            _watchConnected.value = connected
+        }
+        capabilityListener = listener
+
         viewModelScope.launch {
             try {
-                val capClient = Wearable.getCapabilityClient(getApplication())
-                capClient.addListener(
-                    { capInfo ->
-                        val connected = capInfo.nodes.isNotEmpty()
-                        _watchConnected.value = connected
-                    },
-                    "vibration_control"
-                ).await()
+                val capClient = Wearable.getCapabilityClient(getApplication<Application>())
+                capClient.addListener(listener, AppConstants.CAPABILITY_VIBRATION).await()
             } catch (e: Exception) {
                 capabilityListenerRegistered = false
             }
@@ -96,8 +86,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopConnectionMonitor() {
-        // Listener stays registered for the app lifetime — no need to remove
-        // unless we want explicit cleanup. For now, leave it.
+        val listener = capabilityListener ?: return
+        capabilityListener = null
+        capabilityListenerRegistered = false
+        viewModelScope.launch {
+            try {
+                val capClient = Wearable.getCapabilityClient(getApplication<Application>())
+                capClient.removeListener(listener).await()
+            } catch (_: Exception) {
+                // Listener may already be unregistered — safe to ignore
+            }
+        }
     }
 
     fun checkWearConnection() {
@@ -106,33 +105,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun modeConstant() {
-        setMode(MODE_CONSTANT)
-    }
-
-    fun modeIntermittent() {
-        setMode(MODE_INTERMITTENT)
-    }
-
-    fun modeRamp() {
-        setMode(MODE_RAMP)
-    }
-
-    fun modeBurst() {
-        setMode(MODE_BURST)
-    }
-
-    fun modeWave() {
-        setMode(MODE_WAVE)
-    }
-
-    fun modeRandom() {
-        setMode(MODE_RANDOM)
-    }
-
-    fun modeStop() {
-        setMode(MODE_STOP)
-    }
+    fun modeConstant() { setMode(AppConstants.MODE_CONSTANT) }
+    fun modeIntermittent() { setMode(AppConstants.MODE_INTERMITTENT) }
+    fun modeRamp() { setMode(AppConstants.MODE_RAMP) }
+    fun modeBurst() { setMode(AppConstants.MODE_BURST) }
+    fun modeWave() { setMode(AppConstants.MODE_WAVE) }
+    fun modeRandom() { setMode(AppConstants.MODE_RANDOM) }
+    fun modeStop() { setMode(AppConstants.MODE_STOP) }
 
     fun setIntensity(value: Int) {
         _intensity.value = value.coerceIn(0, 100)
@@ -158,24 +137,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentMode = _mode.value
         val currentLevel = _level.value
 
-        // Send to Wear only (phone doesn't vibrate locally)
-        if (currentMode == MODE_STOP || currentMode == MODE_PAUSE) {
+        if (currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
             _isVibrating.value = false
             _statusText.value = "Ready"
         } else {
             _isVibrating.value = true
-
-            val modeLabel = when (currentMode) {
-                MODE_CONSTANT -> "Constant"
-                MODE_INTERMITTENT -> "Intermittent"
-                MODE_RAMP -> "Ramp"
-                MODE_BURST -> "Burst"
-                MODE_WAVE -> "Wave"
-                MODE_RANDOM -> "Random"
-                else -> "Unknown"
-            }
-
-            val speedLabel = arrayOf("Slow", "Medium", "Fast", "Very Fast")[currentLevel]
+            val modeLabel = AppConstants.MODE_LABELS[currentMode] ?: "Unknown"
+            val speedLabel = AppConstants.SPEED_LABELS[currentLevel]
             _statusText.value = "$modeLabel - $speedLabel"
         }
 
@@ -186,8 +154,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        stopHeartbeat()
+        stopConnectionMonitor()
         viewModelScope.launch {
-            wearDataLayer.sendControl(MODE_STOP, 0, 0)
+            wearDataLayer.sendControl(AppConstants.MODE_STOP, 0, 0)
         }
     }
 }

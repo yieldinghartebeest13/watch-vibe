@@ -19,7 +19,7 @@ class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        Log.e(TAG, "Boot completed — starting foreground service")
+        Log.d(TAG, "Boot completed — starting foreground service")
 
         val serviceIntent = Intent(context, VibrationForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

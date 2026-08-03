@@ -1,6 +1,7 @@
 package com.example.vibecontrol
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -16,6 +17,8 @@ class WaveformView @JvmOverloads constructor(
 
     var mode: Int = -1
     var level: Int = 0
+
+    private var cachedBitmap: Bitmap? = null
 
     private val linePaint = Paint().apply {
         color = Color.argb(100, 255, 255, 255)
@@ -35,45 +38,64 @@ class WaveformView @JvmOverloads constructor(
     fun setPattern(mode: Int, level: Int) {
         this.mode = mode
         this.level = level
+        cachedBitmap = null // invalidate cache on mode/level change
         invalidate()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        cachedBitmap = null // invalidate cache on size change
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (width <= 0 || height <= 0) return
 
+        if (cachedBitmap == null) {
+            cachedBitmap = renderToBitmap()
+        }
+        cachedBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+    }
+
+    private fun renderToBitmap(): Bitmap? {
+        val w = width
+        val h = height
+        if (w <= 0 || h <= 0) return null
+
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
         // Clip to rounded bottom corners matching tile_bg.xml (radius 16dp ≈ 24px)
         val radius = 24f
         val clipPath = Path()
-        clipPath.addRoundRect(0f, 0f, width.toFloat(), height.toFloat(),
+        clipPath.addRoundRect(0f, 0f, w.toFloat(), h.toFloat(),
             radius, radius, Path.Direction.CW)
         canvas.clipPath(clipPath)
 
-        val cycleW = width / 2f
-        val h = height.toFloat()
+        val cycleW = w / 2f
         val path = Path()
-
-        // Build ONE cycle spanning [0, cycleW]
-        buildCycle(path, cycleW, h)
+        buildCycle(path, cycleW, h.toFloat())
 
         // Draw cycle 1
-        drawPath(canvas, path)
+        drawPathOn(canvas, path, w, h)
 
         // Draw cycle 2 at offset
         canvas.save()
         canvas.translate(cycleW, 0f)
-        drawPath(canvas, path)
+        drawPathOn(canvas, path, w, h)
         canvas.restore()
+
+        return bitmap
     }
 
     private fun buildCycle(path: Path, w: Float, h: Float) {
         when (mode) {
-            MainViewModel.MODE_CONSTANT -> {
+            AppConstants.MODE_CONSTANT -> {
                 val y = h * 0.2f
                 path.moveTo(0f, y)
                 path.lineTo(w, y)
             }
-            MainViewModel.MODE_INTERMITTENT -> {
+            AppConstants.MODE_INTERMITTENT -> {
                 val pulseCount = if (level == 0) 1 else 2
                 val pulseWidth = w / (pulseCount * 2)
                 for (i in 0 until pulseCount) {
@@ -86,7 +108,7 @@ class WaveformView @JvmOverloads constructor(
                 }
                 path.lineTo(w, h * 0.6f)
             }
-            MainViewModel.MODE_RAMP -> {
+            AppConstants.MODE_RAMP -> {
                 val steps = 5
                 path.moveTo(0f, h * 0.8f)
                 for (i in 0 until steps) {
@@ -96,12 +118,11 @@ class WaveformView @JvmOverloads constructor(
                 }
                 path.lineTo(w, h * 0.8f)
             }
-            MainViewModel.MODE_BURST -> {
-                // 3 taps with equal on/off, then pause
+            AppConstants.MODE_BURST -> {
                 val numTaps = 3
-                val activeWidth = w * 0.7f          // taps+gaps span 70%
-                val pairWidth = activeWidth / numTaps // each tap+gap pair
-                val tapWidth = pairWidth * 0.5f      // half on, half off
+                val activeWidth = w * 0.7f
+                val pairWidth = activeWidth / numTaps
+                val tapWidth = pairWidth * 0.5f
                 val baseY = h * 0.8f
                 val topY = h * 0.1f
 
@@ -116,7 +137,7 @@ class WaveformView @JvmOverloads constructor(
                 path.lineTo(activeWidth, baseY)
                 path.lineTo(w, baseY)
             }
-            MainViewModel.MODE_WAVE -> {
+            AppConstants.MODE_WAVE -> {
                 val samples = 20
                 for (i in 0..samples) {
                     val x = w * i / samples
@@ -125,8 +146,11 @@ class WaveformView @JvmOverloads constructor(
                     if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
             }
-            MainViewModel.MODE_RANDOM -> {
+            AppConstants.MODE_RANDOM -> {
                 val samples = 15
+                // Fixed seed 42 ensures the random waveform is visually stable
+                // across redraws. Without a fixed seed, the chart would jitter on
+                // every frame, which is distracting and not useful.
                 val random = java.util.Random(42)
                 path.moveTo(0f, h / 2f)
                 for (i in 1..samples) {
@@ -138,14 +162,12 @@ class WaveformView @JvmOverloads constructor(
         }
     }
 
-    private fun drawPath(canvas: Canvas, path: Path) {
-        // Fill
+    private fun drawPathOn(canvas: Canvas, path: Path, totalW: Int, totalH: Int) {
         val fillPath = Path(path)
-        fillPath.lineTo(canvas.width / 2f, height.toFloat())
-        fillPath.lineTo(0f, height.toFloat())
+        fillPath.lineTo(totalW / 2f, totalH.toFloat())
+        fillPath.lineTo(0f, totalH.toFloat())
         fillPath.close()
         canvas.drawPath(fillPath, fillPaint)
-        // Line
         canvas.drawPath(path, linePaint)
     }
 }

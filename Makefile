@@ -26,6 +26,8 @@ PHONE_ACT := $(PHONE_PKG)/.MainActivity
 WEAR_LOG_RE := VibeSvc|VibeAct|VibeDataLayer|VibratorEngine
 PHONE_LOG_RE := VibeWearDL|VibeControl
 
+PHONE_TMP := /data/local/tmp/app-debug.apk
+
 .PHONY: all build build-wear build-phone install install-wear install-phone
 .PHONY: launch launch-wear launch-phone stop stop-wear stop-phone
 .PHONY: restart restart-wear restart-phone clear clear-wear clear-phone
@@ -53,7 +55,9 @@ install: install-wear install-phone
 install-wear: build-wear
 	$(ADB_W) install -r $(WEAR_APK) || (sleep 2; $(ADB_W) install -r $(WEAR_APK))
 install-phone: build-phone
-	$(ADB_P) connect $(PHONE_SERIAL) 2>/dev/null; $(ADB_P) install -r -d $(PHONE_APK) || (sleep 2; $(ADB_P) install -r -d $(PHONE_APK))
+	$(ADB_P) connect $(PHONE_SERIAL) 2>/dev/null
+	$(ADB_P) push $(PHONE_APK) $(PHONE_TMP)
+	$(ADB_P) shell pm install -r -d $(PHONE_TMP) || (sleep 2; $(ADB_P) shell pm install -r -d $(PHONE_TMP))
 
 # ═══════════════════════════════════════════════
 # Launch / Stop / Restart
@@ -90,7 +94,8 @@ clear-wear: stop-wear
 clear-phone: stop-phone
 	$(ADB_P) uninstall $(PHONE_PKG) 2>/dev/null; true
 	$(ADB_P) connect $(PHONE_SERIAL) 2>/dev/null; sleep 1
-	$(ADB_P) install -r -d $(PHONE_APK) || (sleep 3; $(ADB_P) connect $(PHONE_SERIAL) 2>/dev/null; $(ADB_P) install -r -d $(PHONE_APK))
+	$(ADB_P) push $(PHONE_APK) $(PHONE_TMP)
+	$(ADB_P) shell pm install -r -d $(PHONE_TMP) || (sleep 2; $(ADB_P) shell pm install -r -d $(PHONE_TMP))
 	$(ADB_P) shell am start -n $(PHONE_ACT)
 
 # ═══════════════════════════════════════════════

@@ -126,6 +126,10 @@ Speed levels (0-3) scale all timings proportionally.
 └──────────────────────────────┘
 ```
 
+Tiles are arranged in a 3-column × 2-row grid: Constant, Intermittent, Ramp on the
+first row, Wave, Burst, Random on the second. Random mode has no waveform chart
+(because random patterns look like noise in a static chart).
+
 Active tile: rotating white dots + pulsing center button that traces the actual
 vibration waveform shape (3 pulses for Burst, sine for Wave, staircase for Ramp, etc.).
 Tap active tile again = stop.
@@ -170,10 +174,11 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 app/src/main/
 ├── AndroidManifest.xml
 ├── java/com/example/vibecontrol/
-│   ├── WearDataLayer.kt     # DataClient + MessageClient + CapabilityClient
-│   ├── MainViewModel.kt     # State + heartbeat + CapabilityClient listener
-│   ├── MainActivity.kt      # 6-tile UI + waveform animations + controls
-│   └── WaveformView.kt      # Mini waveform chart per tile
+│   ├── AppConstants.kt       # Shared constants (identical in both projects)
+│   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient
+│   ├── MainViewModel.kt      # State + heartbeat + CapabilityClient listener
+│   ├── MainActivity.kt       # 6-tile UI + waveform animations + controls
+│   └── WaveformView.kt       # Mini waveform chart per tile (bitmap-cached)
 └── res/
     ├── layout/activity_main.xml
     ├── drawable/ic_dots_circle.xml
@@ -187,9 +192,10 @@ app/src/main/
 app/src/main/
 ├── AndroidManifest.xml       # VIBRATE + WAKE_LOCK + FOREGROUND_*
 ├── java/com/example/vibecontrol/
+│   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
 │   ├── VibrationForegroundService.kt # Listeners + heartbeat + auto-resume
-│   ├── VibrationDataLayerService.kt  # Wake-up only
+│   ├── VibrationDataLayerService.kt  # Wake-up only (static flag check)
 │   ├── BootReceiver.kt               # Auto-start on reboot
 │   └── MainActivity.kt               # Kiosk mode display
 └── res/

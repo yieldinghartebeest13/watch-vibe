@@ -9,6 +9,7 @@ import com.google.android.gms.wearable.NodeClient
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
@@ -22,46 +23,42 @@ class WearDataLayer(context: Context) {
 
     companion object {
         private const val TAG = "VibeWearDL"
-        const val PATH_CONTROL = "/control"
-        const val KEY_MODE = "wear_mode"
-        const val KEY_LEVEL = "wear_level"
-        const val KEY_INTENSITY = "wear_intensity"
     }
 
     suspend fun sendControl(mode: Int, level: Int, intensity: Int) {
         withContext(Dispatchers.IO) {
             try {
-                // Check connected nodes first
                 val nodes = nodeClient.connectedNodes.await()
-                Log.e(TAG, "Nodes connected: ${nodes.size}")
+                Log.d(TAG, "Nodes connected: ${nodes.size}")
                 for (node in nodes) {
-                    Log.e(TAG, "  Node: ${node.displayName} (${node.id})")
+                    Log.d(TAG, "  Node: ${node.displayName} (${node.id})")
                 }
                 if (nodes.isEmpty()) {
-                    Log.e(TAG, "NO WEAR NODES CONNECTED — data won't reach watch!")
+                    Log.w(TAG, "No Wear nodes connected — data won't reach watch!")
                 }
 
-                val request = PutDataMapRequest.create(PATH_CONTROL).apply {
-                    dataMap.putInt(KEY_MODE, mode)
-                    dataMap.putInt(KEY_LEVEL, level)
-                    dataMap.putInt(KEY_INTENSITY, intensity)
+                // Send via DataItem with retry
+                retryWithDelay(2, 300) {
+                    val request = PutDataMapRequest.create(AppConstants.PATH_CONTROL).apply {
+                        dataMap.putInt(AppConstants.KEY_MODE, mode)
+                        dataMap.putInt(AppConstants.KEY_LEVEL, level)
+                        dataMap.putInt(AppConstants.KEY_INTENSITY, intensity)
+                    }
+                    request.setUrgent()
+                    val result = dataClient.putDataItem(request.asPutDataRequest()).await()
+                    Log.d(TAG, "Sent DataItem: mode=$mode level=$level intensity=$intensity uri=${result.uri}")
                 }
-                request.setUrgent()
-                val result = dataClient.putDataItem(request.asPutDataRequest()).await()
-                Log.e(TAG, "Sent DataItem: mode=$mode level=$level intensity=$intensity uri=${result.uri}")
 
                 // Also send via Message API (more reliable for real-time)
                 val payload = "$mode,$level,$intensity".toByteArray()
                 for (node in nodes) {
-                    try {
-                        messageClient.sendMessage(node.id, PATH_CONTROL, payload).await()
-                        Log.e(TAG, "Message sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Message to ${node.displayName} failed", e)
+                    retryWithDelay(2, 300) {
+                        messageClient.sendMessage(node.id, AppConstants.PATH_CONTROL, payload).await()
+                        Log.d(TAG, "Message sent to ${node.displayName}")
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Send failed", e)
+                Log.e(TAG, "Send failed after retries", e)
             }
         }
     }
@@ -70,50 +67,63 @@ class WearDataLayer(context: Context) {
         withContext(Dispatchers.IO) {
             try {
                 val count = ++pingCounter
-                val request = PutDataMapRequest.create("/ping").apply {
+                val request = PutDataMapRequest.create(AppConstants.PATH_PING).apply {
                     dataMap.putLong("timestamp", System.currentTimeMillis())
                     dataMap.putLong("counter", count)
                 }
                 request.setUrgent()
                 dataClient.putDataItem(request.asPutDataRequest()).await()
             } catch (e: Exception) {
-                Log.e(TAG, "Ping failed: ${e.message}")
+                Log.d(TAG, "Ping failed: ${e.message}")
             }
         }
     }
 
-    /** Send a wake-up message to the watch so it starts the foreground
-     * service even if the app hasn't been manually launched. */
     suspend fun sendWakeUp() {
         withContext(Dispatchers.IO) {
             try {
                 val nodes = nodeClient.connectedNodes.await()
                 for (node in nodes) {
                     try {
-                        messageClient.sendMessage(node.id, "/launch", ByteArray(0)).await()
-                        Log.e(TAG, "Wake-up sent to ${node.displayName}")
+                        messageClient.sendMessage(node.id, AppConstants.PATH_LAUNCH, ByteArray(0)).await()
+                        Log.d(TAG, "Wake-up sent to ${node.displayName}")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Wake-up to ${node.displayName} failed", e)
+                        Log.d(TAG, "Wake-up to ${node.displayName} failed", e)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Wake-up failed", e)
+                Log.d(TAG, "Wake-up failed", e)
             }
         }
     }
 
-    /** Check if the wear-vibe app specifically is reachable (not just any paired watch).
-     * Uses the "vibration_control" capability advertised by the watch app. */
     suspend fun isWearConnected(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 val capInfo = capabilityClient.getCapability(
-                    "vibration_control", CapabilityClient.FILTER_REACHABLE
+                    AppConstants.CAPABILITY_VIBRATION, CapabilityClient.FILTER_REACHABLE
                 ).await()
                 capInfo.nodes.isNotEmpty()
             } catch (e: Exception) {
                 Log.e(TAG, "Capability check failed", e)
                 false
+            }
+        }
+    }
+
+    private suspend fun retryWithDelay(
+        attempts: Int = 2,
+        delayMs: Long = 300,
+        block: suspend () -> Unit
+    ) {
+        repeat(attempts) { attempt ->
+            try {
+                block()
+                return
+            } catch (e: Exception) {
+                if (attempt == attempts - 1) throw e
+                Log.w(TAG, "Attempt ${attempt + 1} failed, retrying in ${delayMs}ms: ${e.message}")
+                delay(delayMs)
             }
         }
     }

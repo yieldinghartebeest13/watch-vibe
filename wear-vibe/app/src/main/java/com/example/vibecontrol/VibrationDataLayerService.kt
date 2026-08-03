@@ -14,11 +14,17 @@ import com.google.android.gms.wearable.WearableListenerService
  * This service does NOT control vibration directly — it only starts the
  * VibrationForegroundService, which takes over all listeners and vibration
  * control. This avoids the duplicate-VibratorEngine race condition we had before.
+ *
+ * Uses a static @Volatile flag set by VibrationForegroundService to avoid
+ * the deprecated getRunningServices() check.
  */
 class VibrationDataLayerService : WearableListenerService() {
 
     companion object {
         private const val TAG = "VibeWake"
+
+        /** Set to true by VibrationForegroundService.onCreate(), false in onDestroy(). */
+        @Volatile var isForegroundServiceRunning: Boolean = false
     }
 
     override fun onDataChanged(dataEvents: DataEventBuffer) {
@@ -33,12 +39,7 @@ class VibrationDataLayerService : WearableListenerService() {
     }
 
     private fun startForegroundService() {
-        // Only start if not already running — avoid redundant starts
-        // from every ping/control message after the initial wake-up
-        val manager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
-        val running = manager.getRunningServices(Int.MAX_VALUE)
-            .any { it.service.className == VibrationForegroundService::class.java.name }
-        if (running) {
+        if (isForegroundServiceRunning) {
             Log.d(TAG, "Foreground service already running, skipping wake-up")
             return
         }
