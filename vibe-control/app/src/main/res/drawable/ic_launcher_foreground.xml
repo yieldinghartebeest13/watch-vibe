@@ -8,30 +8,52 @@
     <!-- Top band -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M46,30 L62,30 L62,40 L46,40 Z" />
-
-    <!-- Bottom band -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M46,68 L62,68 L62,78 L46,78 Z" />
+        android:pathData="M46,22 L62,22 Q64,22 64,24 L64,36 Q64,38 62,38 L46,38 Q44,38 44,36 L44,24 Q44,22 46,22 Z" />
 
     <!-- Watch body -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M36,38 L72,38 Q80,38 80,46 L80,62 Q80,70 72,70 L36,70 Q28,70 28,62 L28,46 Q28,38 36,38 Z" />
+        android:pathData="M32,34 L76,34 Q87,34 87,45 L87,61 Q87,72 76,72 L32,72 Q21,72 21,61 L21,45 Q21,34 32,34 Z" />
+
+    <!-- Bottom band -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,72 L64,72 Q66,72 66,74 L66,84 Q66,86 64,86 L44,86 Q42,86 42,84 L42,74 Q42,72 44,72 Z" />
 
     <!-- Crown -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M72,50 L76,50 L76,58 L72,58 Z" />
+        android:pathData="M76,48 L81,48 Q83,48 83,50 L83,56 Q83,58 81,58 L76,58 Z" />
 
-    <!-- Left vibration dot -->
+    <!-- Vibration arc left (inner) -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M26,52m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M22,44 Q16,54 22,64" />
 
-    <!-- Right vibration dot -->
+    <!-- Vibration arc left (outer) -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M82,52m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M16,40 Q8,54 16,68" />
+
+    <!-- Vibration arc right (inner) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M86,44 Q92,54 86,64" />
+
+    <!-- Vibration arc right (outer) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M92,40 Q100,54 92,68" />
 </vector>
