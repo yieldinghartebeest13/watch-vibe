@@ -55,10 +55,10 @@ class VibrationForegroundService : Service() {
     private var lastMode: Int = AppConstants.MODE_PAUSE
     private var lastLevel: Int = 0
     private var lastIntensity: Int = 100
-    private var lastPingTime: Long = 0
-    private var lastPingCounter: Long = -1
+    @Volatile private var lastPingTime: Long = 0
+    @Volatile private var lastPingCounter: Long = -1
     private var heartbeatChecker: Job? = null
-    private var phoneConnected: Boolean = false
+    @Volatile private var phoneConnected: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -276,12 +276,14 @@ class VibrationForegroundService : Service() {
             while (isActive) {
                 delay(1000)
                 val elapsed = System.currentTimeMillis() - lastPingTime
-                if (elapsed > AppConstants.HEARTBEAT_TIMEOUT_MS && phoneConnected) {
+                val connected = phoneConnected
+                if (elapsed > AppConstants.HEARTBEAT_TIMEOUT_MS && connected) {
                     phoneConnected = false
                     Log.d(TAG, "Heartbeat timeout! (${elapsed}ms) → stopping vibration")
                     vibratorEngine.cancel()
                     broadcastStatus()
-                } else if (elapsed <= AppConstants.HEARTBEAT_TIMEOUT_MS && !phoneConnected) {
+                } else if (elapsed <= AppConstants.HEARTBEAT_TIMEOUT_MS && !connected) {
+                    // Phone is sending pings again → reconnected
                     phoneConnected = true
                     Log.d(TAG, "Phone reconnected — resuming vibration mode=$lastMode")
                     if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
@@ -289,6 +291,9 @@ class VibrationForegroundService : Service() {
                     }
                     broadcastStatus()
                 }
+                // Note: if elapsed > TIMEOUT but phoneConnected was already set
+                // to false by the capability listener, that's fine — the listener
+                // already handled the disconnect. We skip the no-op case.
             }
         }
     }
