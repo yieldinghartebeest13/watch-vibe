@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WearVibe"
+rootProject.name = "WatchVibe"
 include(":app")

@@ -11,14 +11,15 @@
 
     <!-- App title (no action bar) -->
     <TextView
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="VibeControl"
+        android:text="WatchVibe"
         android:textColor="#e0e0e0"
-        android:textSize="16sp"
+        android:textSize="22sp"
         android:textStyle="bold"
-        android:letterSpacing="0.1"
-        android:layout_marginBottom="8dp" />
+        android:gravity="start"
+        android:letterSpacing="0.12"
+        android:layout_marginBottom="16dp" />
 
     <!-- Wear status -->
     <TextView

@@ -4,16 +4,47 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+
+    <!-- Watch band (smaller, 24dp viewport) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M3,12v-1.5h2.5L5.5,6.5c0,-3.58 2.92,-6.5 6.5,-6.5s6.5,2.92 6.5,6.5v4H21V12h-2v-1.5H18.5v-4c0,-2.76 -2.24,-5 -5,-5s-5,2.24 -5,5v4H6V12H3z" />
+        android:pathData="M10,2 L14,2 L14,6 L10,6 Z" />
+
+    <!-- Watch body -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M12,15m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+        android:pathData="M7,6 L7,16 Q7,20 10,20 L14,20 Q17,20 17,16 L17,6 Z" />
+
+    <!-- Crown -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M12,18v4h-2v-4h2z" />
+        android:pathData="M17,10 L19,10 Q20,10 20,11 L20,13 Q20,14 19,14 L17,14 Z" />
+
+    <!-- Vibration waves — left -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M12,2v2h-2V2h2z" />
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.0"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M3,8 Q1,12 3,16" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.0"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M1,6 Q-1,12 1,18" />
+
+    <!-- Vibration waves — right -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.0"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M21,8 Q23,12 21,16" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.0"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M23,6 Q25,12 23,18" />
 </vector>

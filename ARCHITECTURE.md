@@ -1,42 +1,41 @@
-# Happy Rumble — Vibration Control Apps
+# WatchVibe — Vibration Control Apps
 
-Two companion apps that replicate the vibration mechanics of the Happy Rumble app,
-with a phone controller and a Wear OS receiver.
+Two companion apps that control a watch's vibration motor from your phone.
 
 ---
 
 ## Architecture (v3 — Amplitude API + Waveform Animation)
 
 ```
-┌─────────────────────────────────────┐     ┌────────────────────────────────────┐
-│  Phone App (vibe-control)           │     │  Wear OS App (wear-vibe)           │
-│  ┌────────────────────────────────┐ │     │  ┌──────────────────────────────┐  │
-│  │ MainActivity                   │ │     │  │ VibrationForegroundService   │  │
-│  │  6 tiles (2×3 grid)            │ │     │  │  ★ VibratorEngine (amplitude) │  │
-│  │  WaveformView per tile         │ │     │  │  ★ Data/Message/Cap listeners │  │
-│  │  Speed +/- (60dp)              │ │     │  │  ★ Heartbeat monitor (1s/2s)  │  │
-│  │  STOP (red when active)        │ │     │  │  ★ Ping counter (anti-stale)   │  │
-│  │  Active tile: rotating dots    │ │     │  │  ★ Auto-resume on reconnect    │  │
-│  │  + waveform-tracing pulse      │ │     │  │  ★ WAKE_LOCK + notification    │  │
-│  └──────────┬─────────────────────┘ │     │  └──────────────┬───────────────┘  │
-│             │                       │     │                 │ broadcasts       │
-│  ┌──────────▼─────────────────────┐ │     │  ┌──────────────▼───────────────┐  │
-│  │ MainViewModel                  │ │     │  │ MainActivity (KIOSK MODE)    │  │
-│  │  mode, level                   │ │     │  │  Mode name as primary status  │  │
-│  │  Heartbeat (1s)               │ │     │  │  Speed label below            │  │
-│  │  CapabilityClient.addListener  │ │     │  │  All touch/back blocked       │  │
-│  └──────────┬─────────────────────┘ │     │  │  Crown long-press to exit     │  │
-│             │                       │     │  └──────────────────────────────┘  │
-│  ┌──────────▼─────────────────────┐ │     │                                    │
-│  │ WearDataLayer                  │ │     │  ┌──────────────────────────────┐  │
-│  │  DataClient + MessageClient    │ │     │  │ VibrationDataLayerService    │  │
-│  │  CapabilityClient (watch det.) │ │     │  │  Wake-up only → starts FGS   │  │
-│  └────────────────────────────────┘ │     │  └──────────────────────────────┘  │
-└─────────────────────────────────────┘     │  ┌──────────────────────────────┐  │
-                  │                         │  │ BootReceiver                 │  │
-         Bluetooth/WiFi                      │  │  Auto-start on reboot        │  │
-         Wear OS Data Layer                  │  └──────────────────────────────┘  │
-         paths: /control, /ping              └────────────────────────────────────┘
+┌──────────────────────────────────────────┐     ┌────────────────────────────────────┐
+│  Phone App (WatchVibeControl)            │     │  Wear OS App (WatchVibe)           │
+│  ┌────────────────────────────────────┐  │     │  ┌──────────────────────────────┐  │
+│  │ MainActivity                       │  │     │  │ VibrationForegroundService   │  │
+│  │  6 tiles (3×2 grid)                │  │     │  │  ★ VibratorEngine (amplitude) │  │
+│  │  WaveformView per tile             │  │     │  │  ★ Data/Message/Cap listeners │  │
+│  │  Speed +/- (60dp)                  │  │     │  │  ★ Heartbeat monitor (1s/2s)  │  │
+│  │  STOP (red when active)            │  │     │  │  ★ Ping counter (anti-stale)   │  │
+│  │  Active tile: rotating dots        │  │     │  │  ★ Auto-resume on reconnect    │  │
+│  │  + waveform-tracing pulse          │  │     │  │  ★ WAKE_LOCK + notification    │  │
+│  └──────────┬─────────────────────────┘  │     │  └──────────────┬───────────────┘  │
+│             │                            │     │                 │ broadcasts       │
+│  ┌──────────▼─────────────────────────┐  │     │  ┌──────────────▼───────────────┐  │
+│  │ MainViewModel                      │  │     │  │ MainActivity (KIOSK MODE)    │  │
+│  │  mode, level                       │  │     │  │  Mode name as primary status  │  │
+│  │  Heartbeat (1s)                    │  │     │  │  Speed label below            │  │
+│  │  CapabilityClient.addListener      │  │     │  │  All touch/back blocked       │  │
+│  └──────────┬─────────────────────────┘  │     │  │  Crown long-press to exit     │  │
+│             │                            │     │  └──────────────────────────────┘  │
+│  ┌──────────▼─────────────────────────┐  │     │                                    │
+│  │ WearDataLayer                      │  │     │  ┌──────────────────────────────┐  │
+│  │  DataClient + MessageClient        │  │     │  │ VibrationDataLayerService    │  │
+│  │  CapabilityClient (watch det.)     │  │     │  │  Wake-up only → starts FGS   │  │
+│  └────────────────────────────────────┘  │     │  └──────────────────────────────┘  │
+└──────────────────────────────────────────┘     │  ┌──────────────────────────────┐  │
+                  │                              │  │ BootReceiver                 │  │
+         Bluetooth/WiFi                           │  │  Auto-start on reboot        │  │
+         Wear OS Data Layer                       │  └──────────────────────────────┘  │
+         paths: /control, /ping                   └────────────────────────────────────┘
          keys: wear_mode, wear_level,
                 wear_intensity
 ```
@@ -47,8 +46,8 @@ with a phone controller and a Wear OS receiver.
 
 | App | applicationId |
 |-----|---------------|
-| Phone (vibe-control) | `com.example.vibecontrol` |
-| Watch (wear-vibe) | `com.example.vibecontrol` |
+| Phone (WatchVibeControl) | `com.example.vibecontrol` |
+| Watch (WatchVibe) | `com.example.vibecontrol` |
 
 Play Services routes data layer items by package name. Different IDs = data silently dropped.
 
@@ -90,7 +89,7 @@ All modes normalized to ~1000ms cycle at slow speed (level 0), scaling proportio
 | Constant | 0 | Amplitude | `[5000ms at 255]` looped | Continuous |
 | Intermittent | 1 | Amplitude | 70/30 on/off duty | 700+300=1000ms |
 | Ramp | 2 | Amplitude | 5 ascending amplitude steps | 5×200=1000ms |
-| Burst | 3 | **Legacy** | 3 taps + pause, 70/30 duty | 5×140+300=1000ms |
+| Burst | 3 | Amplitude | 3 taps + pause, 50ms floor | 5×150+250=1000ms |
 | Wave | 4 | Amplitude | 20-step sine, starts at trough | 20×50=1000ms |
 | Random | 5 | Amplitude | 30 random segments | ~1000ms avg |
 
@@ -112,8 +111,9 @@ Speed levels (0-3) scale all timings proportionally.
 
 ```
 ┌──────────────────────────────┐
-│  Connected                   │
-│  Constant — Slow             │
+│  WatchVibe                   │  ← app title
+│  Connected                   │  ← connection status
+│  Constant — Slow             │  ← mode + speed
 ├──────────┬──────────┬─────────┤
 │ CONSTANT │INTERMITT.│  RAMP   │
 │ ──────── │ ────┬─── │ ─────── │  ← waveform charts
@@ -168,7 +168,7 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 
 ## Project Structure
 
-### vibe-control/ (Phone)
+### vibe-control/ (WatchVibeControl — Phone)
 
 ```
 app/src/main/
@@ -186,7 +186,7 @@ app/src/main/
     └── drawable/tile_bg_pause_btn.xml
 ```
 
-### wear-vibe/ (Watch)
+### wear-vibe/ (WatchVibe — Watch)
 
 ```
 app/src/main/

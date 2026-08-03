@@ -24,7 +24,7 @@ PHONE_ACT := $(PHONE_PKG)/.MainActivity
 
 # Log grep patterns
 WEAR_LOG_RE := VibeSvc|VibeAct|VibeDataLayer|VibratorEngine
-PHONE_LOG_RE := VibeWearDL|VibeControl
+PHONE_LOG_RE := VibeWearDL|WatchVibeControl
 
 PHONE_TMP := /data/local/tmp/app-debug.apk
 
