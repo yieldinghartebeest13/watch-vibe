@@ -1,7 +1,14 @@
 #!/bin/bash
 # Per-repo credential helper: uses GH_REPO_USER for github.com auth.
 # Reads git credential protocol from stdin, outputs credentials to stdout.
+# Sources .env from the repo root (derived from this script's location).
 # Set GH_REPO_USER in .env to the GitHub account that owns this repo.
+
+# Source .env from repo root
+_script_dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$_script_dir/.env" ]; then
+    set -a; . "$_script_dir/.env"; set +a
+fi
 
 req_host="" req_protocol=""
 
