@@ -215,9 +215,9 @@ class MainActivity : AppCompatActivity() {
             } * 5
             AppConstants.MODE_BURST -> {
                 val (tap, pause) = when (level.coerceIn(0, 3)) {
-                    0 -> 140L to 300L; 1 -> 90L to 195L
-                    2 -> 55L to 120L; 3 -> 35L to 75L
-                    else -> 140L to 300L
+                    0 -> 150L to 250L; 1 -> 100L to 200L
+                    2 -> 70L to 150L;  3 -> 50L to 120L
+                    else -> 150L to 250L
                 }
                 tap * 5 + pause
             }

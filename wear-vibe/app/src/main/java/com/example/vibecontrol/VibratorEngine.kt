@@ -150,21 +150,21 @@ class VibratorEngine(context: Context) {
             }
 
             AppConstants.MODE_BURST -> {
-                // Legacy binary API (no amplitudes) — the amplitude API creates
-                // artifacts with taps shorter than ~50ms because the motor
-                // controller ramps amplitude transitions, eating into the tap.
+                // Burst base cycle is slowed vs other modes — the amplitude API
+                // needs ~50ms minimum per step to avoid motor artifacts.
+                // Level 0 = 1000ms, level 3 = 370ms (50ms tap floor).
                 val (tap, pause) = when (level.coerceIn(0, 3)) {
-                    0 -> 140L to 300L
-                    1 -> 90L to 195L
-                    2 -> 55L to 120L
-                    3 -> 35L to 75L
-                    else -> 140L to 300L
+                    0 -> 150L to 250L   // 5*150+250 = 1000ms
+                    1 -> 100L to 200L   // 5*100+200 = 700ms
+                    2 ->  70L to 150L   // 5*70+150  = 500ms
+                    3 ->  50L to 120L   // 5*50+120  = 370ms
+                    else -> 150L to 250L
                 }
-                // Legacy format: [wait, ON, OFF, ON, OFF, ON, OFF-pause]
-                val pattern = longArrayOf(0L, tap, tap, tap, tap, tap, pause)
-                val scaled = scalePowerLegacy(pattern, currentIntensity)
+                val timings = longArrayOf(tap, tap, tap, tap, tap, pause)
+                val amplitudes = intArrayOf(255, 0, 255, 0, 255, 0)
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
                 isActive = true
-                vibrateLegacy(scaled)
+                vibrate(t, a)
             }
 
             AppConstants.MODE_WAVE -> {

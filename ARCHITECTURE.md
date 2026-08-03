@@ -56,8 +56,8 @@ Play Services routes data layer items by package name. Different IDs = data sile
 
 `VibrationEffect.createWaveform(timings, amplitudes, repeat)` with per-step amplitude
 values (0-255). The motor transitions smoothly between amplitude levels rather than
-binary on/off clicking. Burst mode uses legacy `createWaveform(timings, repeat)` without
-amplitudes because very short taps (35-140ms) create artifacts with the amplitude API.
+binary on/off clicking. Burst mode uses a 50ms minimum tap duration to prevent
+motor artifacts at very short timings, keeping its base cycle at 1000ms.
 
 ### 3. No command ordering — dedup guard only
 
