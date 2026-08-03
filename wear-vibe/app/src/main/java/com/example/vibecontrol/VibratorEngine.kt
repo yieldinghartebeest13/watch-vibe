@@ -8,29 +8,24 @@ import android.os.VibratorManager
 import android.content.Context
 
 /**
- * Core vibration engine matching the original Happy Rumble patterns.
+ * Core vibration engine using amplitude-based VibrationEffect APIs.
+ *
+ * Each mode generates a waveform as paired (timings, amplitudes) arrays:
+ *   - timings: duration in ms for each step
+ *   - amplitudes: per-step amplitude 0-255 (0=off, 255=max)
  *
  * Modes:
  *   MODE_STOP (-2)      = cancel vibration
- *   MODE_PAUSE (-3)      = cancel (pause behavior)
- *   MODE_CONSTANT (0)    = continuous vibration  [wait 1ms, on 5000ms] loop
- *   MODE_INTERMITTENT (1)= pulsing patterns at 4 levels
- *   MODE_WAVE (2)        = escalating pulses that ramp up then reset
- *   MODE_BURST (3)       = triple-tap throb with variable pause
+ *   MODE_PAUSE (-3)     = cancel (pause behavior)
+ *   MODE_CONSTANT (0)   = continuous vibration at amplitude 255
+ *   MODE_INTERMITTENT (1)= binary on/off pulsing via amplitudes
+ *   MODE_RAMP (2)       = staircase ascending amplitudes
+ *   MODE_BURST (3)      = triple full-amplitude taps with pause
+ *   MODE_WAVE (4)       = smooth sine amplitude envelope
+ *   MODE_RANDOM (5)     = random amplitudes and durations
  *
- * Intermittent levels:
- *   Level 0 (slow):      [wait 500ms, on 500ms] loop
- *   Level 1 (medium):    [wait 250, on 250, off 250, on 250] loop
- *   Level 2 (fast):      [wait 125, on 125, off 125, on 125] loop
- *   Level 3 (very fast): [wait 75, on 75, off 75, on 75] loop
- *
- * Wave: level (0-3) controls speed → gap ranges from 200ms (slow) to 50ms (fast).
- *   Pattern [50,gap, 100,gap, 150,gap, 200,gap, 250,gap, 300,gap].
- *   Intensity (0-100) scales ON-duration power.
- *
- * Burst: level (0-3) controls speed → pause ranges from 1000ms (slow) to 350ms (fast).
- *   Pattern [30,30, 30,30, 30, pause].
- *   Intensity (0-100) scales ON-duration power.
+ * Level (0=slow .. 3=very fast) controls timing speed.
+ * Intensity (0-100) scales amplitudes via scalePower.
  *
  * Dedup: calling setModeVibration with identical mode+level+intensity is a no-op,
  * preventing stutter from multiple listener callbacks.
@@ -135,70 +130,87 @@ class VibratorEngine(context: Context) {
             }
 
             MODE_CONSTANT -> {
-                // [wait 1ms, on 5000ms] looped — effectively continuous
-                // (the 1ms gap between 5s cycles is imperceptible)
-                val pattern = longArrayOf(1, 5000)
+                val timings = longArrayOf(5000)
+                val amplitudes = intArrayOf(255)
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
                 isActive = true
-                vibrate(scalePower(pattern, currentIntensity))
+                vibrate(t, a)
             }
 
             MODE_INTERMITTENT -> {
-                val pattern = when (level) {
-                    LEVEL_SLOW -> longArrayOf(500, 500)
-                    LEVEL_MEDIUM -> longArrayOf(250, 250, 250, 250)
-                    LEVEL_FAST -> longArrayOf(125, 125, 125, 125)
-                    LEVEL_VERY_FAST -> longArrayOf(75, 75, 75, 75)
-                    else -> longArrayOf(500, 500)
+                // 70% on / 30% off duty cycle. Cycle target: 1000ms (level 0)
+                val (on, off) = when (level.coerceIn(0, 3)) {
+                    0 -> 700L to 300L
+                    1 -> 228L to 97L
+                    2 -> 140L to 60L
+                    3 -> 88L to 37L
+                    else -> 700L to 300L
                 }
+                val timings = longArrayOf(on, off)
+                val amplitudes = intArrayOf(255, 0)
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
                 isActive = true
-                vibrate(scalePower(pattern, currentIntensity))
+                vibrate(t, a)
             }
 
             MODE_RAMP -> {
-                // level (0-3) controls speed via gap size
-                val gap = when (level.coerceIn(0, 3)) {
-                    0 -> 200L
-                    1 -> 130L
-                    2 -> 80L
-                    3 -> 50L
-                    else -> 200L
+                val count = 5
+                val stepMs = when (level.coerceIn(0, 3)) {
+                    0 -> 200L; 1 -> 130L; 2 -> 80L; 3 -> 50L; else -> 200L
                 }
-                val pattern = longArrayOf(
-                    50, gap,
-                    100, gap,
-                    150, gap,
-                    200, gap,
-                    250, gap,
-                    300, gap
-                )
+                val timings = LongArray(count) { stepMs }
+                val amplitudes = IntArray(count) { i -> ((i + 1) * 255 / count) }
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
                 isActive = true
-                vibrate(scalePower(pattern, currentIntensity))
-            }
-
-            MODE_WAVE -> {
-                val pattern = generateWavePattern(currentLevel, currentIntensity)
-                isActive = true
-                vibrate(pattern)
-            }
-
-            MODE_RANDOM -> {
-                val pattern = generateRandomPattern(currentLevel, currentIntensity)
-                isActive = true
-                vibrate(pattern)
+                vibrate(t, a)
             }
 
             MODE_BURST -> {
-                // level (0-3) controls speed via pause between bursts
-                val pause = when (level.coerceIn(0, 3)) {
-                    0 -> 1000L
-                    1 -> 700L
-                    2 -> 500L
-                    3 -> 350L
-                    else -> 1000L
+                val (tap, pause) = when (level.coerceIn(0, 3)) {
+                    0 -> 140L to 300L
+                    1 -> 90L to 195L
+                    2 -> 55L to 120L
+                    3 -> 35L to 75L
+                    else -> 140L to 300L
                 }
-                val pattern = longArrayOf(30, 30, 30, 30, 30, pause)
+                val timings = longArrayOf(tap, tap, tap, tap, tap, pause)
+                val amplitudes = intArrayOf(255, 0, 255, 0, 255, 0)
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
                 isActive = true
-                vibrate(scalePower(pattern, currentIntensity))
+                vibrate(t, a)
+            }
+
+            MODE_WAVE -> {
+                // Cycle target: 1000ms (level 0), 20 steps
+                val steps = 20
+                val stepMs = when (level.coerceIn(0, 3)) {
+                    0 -> 50L; 1 -> 32L; 2 -> 20L; 3 -> 12L; else -> 50L
+                }
+                val timings = LongArray(steps) { stepMs }
+                val amplitudes = IntArray(steps) { i ->
+                    val angle = -Math.PI / 2 + i * 2.0 * Math.PI / steps
+                    ((Math.sin(angle) * 127 + 128).toInt()).coerceIn(0, 255)
+                }
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
+                isActive = true
+                vibrate(t, a)
+            }
+
+            MODE_RANDOM -> {
+                // Long pattern (30 steps) — loop is long enough to feel unpredictable.
+                val count = 30
+                val (minMs, maxMs) = when (level.coerceIn(0, 3)) {
+                    0 -> 100L to 500L
+                    1 -> 60L to 350L
+                    2 -> 30L to 200L
+                    3 -> 15L to 120L
+                    else -> 100L to 500L
+                }
+                val timings = LongArray(count) { minMs + (Math.random() * (maxMs - minMs)).toLong() }
+                val amplitudes = IntArray(count) { (Math.random() * 256).toInt() }
+                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
+                isActive = true
+                vibrate(t, a)
             }
         }
     }
@@ -229,86 +241,49 @@ class VibratorEngine(context: Context) {
     }
 
     /**
-     * Scale odd-index (ON) durations by intensity factor.
-     * In Android VibrationEffect timings, even indices are OFF durations,
-     * odd indices are ON durations. At 100% intensity = full power,
-     * at 50% = half-duration pulses, at 0% = 1ms (barely perceptible).
+     * Scale amplitudes by intensity factor (0-100).
+     * Timings are left unchanged — only amplitudes are attenuated.
      */
-    private fun scalePower(pattern: LongArray, intensity: Int): LongArray {
-        if (intensity >= 100) return pattern
+    private fun scalePower(timings: LongArray, amplitudes: IntArray, intensity: Int): Pair<LongArray, IntArray> {
+        if (intensity >= 100) return Pair(timings, amplitudes)
         val factor = intensity / 100f
-        return LongArray(pattern.size) { i ->
-            if (i % 2 == 1) (pattern[i] * factor).toLong().coerceAtLeast(1)
-            else pattern[i]
+        val scaledAmps = IntArray(amplitudes.size) { i ->
+            (amplitudes[i] * factor).toInt().coerceIn(0, 255)
         }
+        return Pair(timings, scaledAmps)
     }
 
-    private fun generateWavePattern(level: Int, intensity: Int): LongArray {
-        val steps: Int
-        val minOn: Long
-        val maxOn: Long
-        val gap: Long
-
-        when (level.coerceIn(0, 3)) {
-            0 -> { steps = 5; minOn = 40; maxOn = 350; gap = 120 }
-            1 -> { steps = 4; minOn = 30; maxOn = 250; gap = 80 }
-            2 -> { steps = 4; minOn = 20; maxOn = 180; gap = 50 }
-            3 -> { steps = 3; minOn = 15; maxOn = 120; gap = 30 }
-            else -> { steps = 5; minOn = 40; maxOn = 350; gap = 120 }
-        }
-
-        val pattern = mutableListOf<Long>()
-        // Rising phase
-        for (i in 0 until steps) {
-            val on = minOn + ((maxOn - minOn) * i / (steps - 1).coerceAtLeast(1))
-            pattern.add(gap)
-            pattern.add(on)
-        }
-        // Peak
-        pattern.add(gap)
-        pattern.add(maxOn)
-        // Falling phase
-        for (i in steps - 1 downTo 0) {
-            val on = minOn + ((maxOn - minOn) * i / (steps - 1).coerceAtLeast(1))
-            pattern.add(gap)
-            pattern.add(on)
-        }
-
-        return scalePower(pattern.toLongArray(), intensity)
-    }
-
-    private fun generateRandomPattern(level: Int, intensity: Int): LongArray {
-        val onMin: Long
-        val onMax: Long
-        val gapMin: Long
-        val gapMax: Long
-        val count: Int
-
-        when (level.coerceIn(0, 3)) {
-            0 -> { onMin = 100; onMax = 500; gapMin = 100; gapMax = 400; count = 8 }
-            1 -> { onMin = 60; onMax = 350; gapMin = 60; gapMax = 250; count = 10 }
-            2 -> { onMin = 30; onMax = 200; gapMin = 30; gapMax = 150; count = 12 }
-            3 -> { onMin = 15; onMax = 120; gapMin = 15; gapMax = 80; count = 14 }
-            else -> { onMin = 100; onMax = 500; gapMin = 100; gapMax = 400; count = 8 }
-        }
-
-        val pattern = LongArray(count * 2)
-        for (i in 0 until count) {
-            val on = onMin + (Math.random() * (onMax - onMin + 1)).toLong()
-            val gap = gapMin + (Math.random() * (gapMax - gapMin + 1)).toLong()
-            pattern[i * 2] = gap      // wait
-            pattern[i * 2 + 1] = on   // on
-        }
-        return scalePower(pattern, intensity)
-    }
-
-    private fun vibrate(pattern: LongArray) {
+    /**
+     * Play a looping waveform using amplitude-based API.
+     *
+     * Uses VibrationEffect.createWaveform(timings, amplitudes, repeat)
+     * where each step has its own duration and amplitude (0-255).
+     */
+    private fun vibrate(timings: LongArray, amplitudes: IntArray) {
         if (!vibrator.hasVibrator()) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val effect = VibrationEffect.createWaveform(pattern, 0) // 0 = loop indefinitely
+            val effect = VibrationEffect.createWaveform(timings, amplitudes, 0) // 0 = loop
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // USAGE_ALARM bypasses ambient-mode restrictions on Wear OS
+                vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+            } else {
+                vibrator.vibrate(effect)
+            }
+        } else {
+            // Pre-API 26: unreachable on Wear OS 5+ (API 34+). Use no-op fallback.
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(longArrayOf(0), -1)
+        }
+    }
+
+    /** Legacy vibrate using binary on/off pattern (no amplitudes).
+     * Used for Burst mode where the amplitude API creates artifacts. */
+    private fun vibrateLegacy(pattern: LongArray) {
+        if (!vibrator.hasVibrator()) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val effect = VibrationEffect.createWaveform(pattern, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
             } else {
                 vibrator.vibrate(effect)
@@ -316,6 +291,16 @@ class VibratorEngine(context: Context) {
         } else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(pattern, 0)
+        }
+    }
+
+    /** Scale ON durations (odd indices) for legacy binary patterns. */
+    private fun scalePowerLegacy(pattern: LongArray, intensity: Int): LongArray {
+        if (intensity >= 100) return pattern
+        val factor = intensity / 100f
+        return LongArray(pattern.size) { i ->
+            if (i % 2 == 1) (pattern[i] * factor).toLong().coerceAtLeast(1)
+            else pattern[i]
         }
     }
 }

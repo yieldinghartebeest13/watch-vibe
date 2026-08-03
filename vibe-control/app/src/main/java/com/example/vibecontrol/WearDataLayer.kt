@@ -2,6 +2,7 @@ package com.example.vibecontrol
 
 import android.util.Log
 import android.content.Context
+import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.DataClient
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.NodeClient
@@ -14,7 +15,10 @@ import kotlinx.coroutines.withContext
 class WearDataLayer(context: Context) {
     private val dataClient: DataClient = Wearable.getDataClient(context)
     private val messageClient: MessageClient = Wearable.getMessageClient(context)
+    private val capabilityClient: CapabilityClient = Wearable.getCapabilityClient(context)
     private val nodeClient: NodeClient = Wearable.getNodeClient(context)
+
+    private var pingCounter: Long = 0
 
     companion object {
         private const val TAG = "VibeWearDL"
@@ -62,12 +66,53 @@ class WearDataLayer(context: Context) {
         }
     }
 
+    suspend fun sendPing() {
+        withContext(Dispatchers.IO) {
+            try {
+                val count = ++pingCounter
+                val request = PutDataMapRequest.create("/ping").apply {
+                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putLong("counter", count)
+                }
+                request.setUrgent()
+                dataClient.putDataItem(request.asPutDataRequest()).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Ping failed: ${e.message}")
+            }
+        }
+    }
+
+    /** Send a wake-up message to the watch so it starts the foreground
+     * service even if the app hasn't been manually launched. */
+    suspend fun sendWakeUp() {
+        withContext(Dispatchers.IO) {
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                for (node in nodes) {
+                    try {
+                        messageClient.sendMessage(node.id, "/launch", ByteArray(0)).await()
+                        Log.e(TAG, "Wake-up sent to ${node.displayName}")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Wake-up to ${node.displayName} failed", e)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Wake-up failed", e)
+            }
+        }
+    }
+
+    /** Check if the wear-vibe app specifically is reachable (not just any paired watch).
+     * Uses the "vibration_control" capability advertised by the watch app. */
     suspend fun isWearConnected(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                nodeClient.connectedNodes.await().isNotEmpty()
+                val capInfo = capabilityClient.getCapability(
+                    "vibration_control", CapabilityClient.FILTER_REACHABLE
+                ).await()
+                capInfo.nodes.isNotEmpty()
             } catch (e: Exception) {
-                Log.e(TAG, "Node check failed", e)
+                Log.e(TAG, "Capability check failed", e)
                 false
             }
         }

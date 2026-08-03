@@ -12,6 +12,14 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import com.google.android.gms.wearable.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Foreground service that keeps the vibration listener alive even with the
@@ -48,6 +56,8 @@ class VibrationForegroundService : Service() {
 
         // Broadcast for status updates to Activity
         const val BROADCAST_STATUS = "com.example.vibecontrol.STATUS"
+        const val HEARTBEAT_TIMEOUT_MS = 2_000L
+        const val EXTRA_PHONE_CONNECTED = "phoneConnected"
     }
 
     private lateinit var vibratorEngine: VibratorEngine
@@ -55,6 +65,12 @@ class VibrationForegroundService : Service() {
     private var dataListener: DataClient.OnDataChangedListener? = null
     private var messageListener: MessageClient.OnMessageReceivedListener? = null
     private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
+    private var lastMode: Int = VibratorEngine.MODE_PAUSE
+    private var lastLevel: Int = 0
+    private var lastIntensity: Int = 100
+    private var lastPingTime: Long = 0
+    private var lastPingCounter: Long = -1
+    private var heartbeatChecker: Job? = null
     private var phoneConnected: Boolean = false
 
     override fun onCreate() {
@@ -76,6 +92,7 @@ class VibrationForegroundService : Service() {
 
         createNotificationChannel()
         startListeners()
+        startHeartbeatMonitor()
         acquireWakeLock()
     }
 
@@ -101,6 +118,7 @@ class VibrationForegroundService : Service() {
 
     override fun onDestroy() {
         Log.e(TAG, "onDestroy — cleaning up")
+        heartbeatChecker?.cancel()
         vibratorEngine.cancel()
         stopListeners()
         releaseWakeLock()
@@ -136,6 +154,7 @@ class VibrationForegroundService : Service() {
                         val intensity = map.getInt(KEY_INTENSITY, 100)
 
                         Log.e(TAG, "DataItem: mode=$mode level=$level intensity=$intensity")
+                        lastMode = mode; lastLevel = level; lastIntensity = intensity
                         vibratorEngine.setModeVibration(mode, level, intensity)
                         broadcastStatus()
 
@@ -155,6 +174,15 @@ class VibrationForegroundService : Service() {
                     PATH_LAUNCH -> {
                         Log.e(TAG, "Launch request from phone")
                         startMainActivity()
+                    }
+                    "/ping" -> {
+                        val map = DataMapItem.fromDataItem(item).dataMap
+                        val counter = map.getLong("counter", -1)
+                        if (counter > lastPingCounter) {
+                            lastPingCounter = counter
+                            lastPingTime = System.currentTimeMillis()
+                        }
+                        // else: stale re-delivery, ignore
                     }
                 }
             }
@@ -191,6 +219,7 @@ class VibrationForegroundService : Service() {
                     }
 
                     Log.e(TAG, "Message: mode=$mode level=$level intensity=$intensity")
+                    lastMode = mode; lastLevel = level; lastIntensity = intensity
                     vibratorEngine.setModeVibration(mode, level, intensity)
                     broadcastStatus()
                 }
@@ -213,6 +242,10 @@ class VibrationForegroundService : Service() {
             phoneConnected = nodes.isNotEmpty()
             Log.e(TAG, "Capability changed: ${nodes.size} nodes (was=$wasConnected now=$phoneConnected)")
 
+            if (phoneConnected) {
+                lastPingTime = System.currentTimeMillis()
+            }
+
             if (wasConnected && !phoneConnected) {
                 // Phone disconnected — stop vibration immediately
                 Log.e(TAG, "Phone disconnected → stopping vibration")
@@ -231,6 +264,31 @@ class VibrationForegroundService : Service() {
             .addOnFailureListener {
                 Log.e(TAG, "Capability listener FAIL: ${it.message}")
             }
+    }
+
+    private fun startHeartbeatMonitor() {
+        lastPingTime = System.currentTimeMillis()
+        heartbeatChecker = CoroutineScope(Dispatchers.IO).launch {
+            delay(2000) // give initial connection time
+            Log.e(TAG, "Heartbeat monitor started (timeout=${HEARTBEAT_TIMEOUT_MS}ms)")
+            while (isActive) {
+                delay(1000)
+                val elapsed = System.currentTimeMillis() - lastPingTime
+                if (elapsed > HEARTBEAT_TIMEOUT_MS && phoneConnected) {
+                    phoneConnected = false
+                    Log.e(TAG, "Heartbeat timeout! (${elapsed}ms) → stopping vibration")
+                    vibratorEngine.cancel()
+                    broadcastStatus()
+                } else if (elapsed <= HEARTBEAT_TIMEOUT_MS && !phoneConnected) {
+                    phoneConnected = true
+                    Log.e(TAG, "Phone reconnected — resuming vibration mode=$lastMode")
+                    if (lastMode != VibratorEngine.MODE_STOP && lastMode != VibratorEngine.MODE_PAUSE) {
+                        vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
+                    }
+                    broadcastStatus()
+                }
+            }
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────
@@ -262,6 +320,7 @@ class VibrationForegroundService : Service() {
             putExtra(EXTRA_LEVEL, vibratorEngine.level)
             putExtra(EXTRA_INTENSITY, vibratorEngine.intensity)
             putExtra(EXTRA_ACTIVE, vibratorEngine.vibrating)
+            putExtra(EXTRA_PHONE_CONNECTED, phoneConnected)
         }
         sendBroadcast(intent)
     }

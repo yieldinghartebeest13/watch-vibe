@@ -54,7 +54,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileConstantBg"
@@ -101,6 +103,12 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
+        <com.example.vibecontrol.WaveformView
+            android:id="@+id/tileConstantChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
             </FrameLayout>
 
             <!-- Intermittent tile -->
@@ -113,7 +121,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileIntermittentBg"
@@ -160,6 +170,12 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
+        <com.example.vibecontrol.WaveformView
+            android:id="@+id/tileIntermittentChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
             </FrameLayout>
         </LinearLayout>
 
@@ -180,7 +196,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileRampBg"
@@ -227,6 +245,12 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
+        <com.example.vibecontrol.WaveformView
+            android:id="@+id/tileRampChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
             </FrameLayout>
 
             <!-- Burst tile -->
@@ -239,7 +263,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileBurstBg"
@@ -286,6 +312,12 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
+        <com.example.vibecontrol.WaveformView
+            android:id="@+id/tileBurstChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
             </FrameLayout>
         </LinearLayout>
 
@@ -306,7 +338,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileWaveBg"
@@ -353,6 +387,12 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
+        <com.example.vibecontrol.WaveformView
+            android:id="@+id/tileWaveChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
             </FrameLayout>
 
             <!-- Random tile -->
@@ -365,7 +405,9 @@
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
-                android:background="@drawable/tile_bg_active">
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
                 <View
                     android:id="@+id/tileRandomBg"
@@ -412,6 +454,7 @@
                         android:layout_gravity="center"
                         android:background="@drawable/tile_bg_pause_btn" />
                 </FrameLayout>
+
             </FrameLayout>
         </LinearLayout>
     </LinearLayout>

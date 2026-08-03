@@ -2,3 +2,12 @@
 /.crew
 build
 .gradle
+*.xapk
+xapk_extracted/
+.pi/
+.env
+
+!.crew/artifacts/
+!.crew/graphs/
+!.crew/artifacts/.gitkeep
+!.crew/graphs/.gitkeep

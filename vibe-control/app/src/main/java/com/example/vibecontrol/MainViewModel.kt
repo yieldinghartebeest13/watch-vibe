@@ -3,9 +3,14 @@ package com.example.vibecontrol
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -35,15 +40,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isVibrating = MutableStateFlow(false)
     val isVibrating: StateFlow<Boolean> = _isVibrating.asStateFlow()
 
-    private val _wearConnected = MutableStateFlow(false)
-    val wearConnected: StateFlow<Boolean> = _wearConnected.asStateFlow()
+    private val _watchConnected = MutableStateFlow(false)
+    val watchConnected: StateFlow<Boolean> = _watchConnected.asStateFlow()
 
     private val _statusText = MutableStateFlow("Ready")
     val statusText: StateFlow<String> = _statusText.asStateFlow()
 
+    private var heartbeatJob: Job? = null
+    private var capabilityListenerRegistered = false
+
+    fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = viewModelScope.launch {
+            while (isActive) {
+                delay(1000)
+                wearDataLayer.sendPing()
+            }
+        }
+    }
+
+    fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
+    fun startConnectionMonitor() {
+        if (capabilityListenerRegistered) return
+        capabilityListenerRegistered = true
+
+        // Initial check + wake-up
+        viewModelScope.launch {
+            val connected = wearDataLayer.isWearConnected()
+            _watchConnected.value = connected
+            if (connected) {
+                // Send wake-up in case the watch app was killed
+                wearDataLayer.sendWakeUp()
+            }
+        }
+
+        // Listener for real-time changes
+        viewModelScope.launch {
+            try {
+                val capClient = Wearable.getCapabilityClient(getApplication())
+                capClient.addListener(
+                    { capInfo ->
+                        val connected = capInfo.nodes.isNotEmpty()
+                        _watchConnected.value = connected
+                    },
+                    "vibration_control"
+                ).await()
+            } catch (e: Exception) {
+                capabilityListenerRegistered = false
+            }
+        }
+    }
+
+    fun stopConnectionMonitor() {
+        // Listener stays registered for the app lifetime — no need to remove
+        // unless we want explicit cleanup. For now, leave it.
+    }
+
     fun checkWearConnection() {
         viewModelScope.launch {
-            _wearConnected.value = wearDataLayer.isWearConnected()
+            _watchConnected.value = wearDataLayer.isWearConnected()
         }
     }
 

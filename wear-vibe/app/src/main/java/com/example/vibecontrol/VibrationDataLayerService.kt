@@ -1,43 +1,53 @@
 package com.example.vibecontrol
 
+import android.content.Intent
+import android.os.Build
 import android.util.Log
-import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
-import com.google.android.gms.wearable.DataMapItem
+import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.WearableListenerService
 
 /**
- * Listens for data layer changes from the phone app.
- * When the phone sends mode/level changes on path "/control",
- * this service applies them to the VibratorEngine.
+ * Minimal wake-up service. Play Services can start this service to deliver
+ * DataItems or Messages even when the app process isn't running.
+ *
+ * This service does NOT control vibration directly — it only starts the
+ * VibrationForegroundService, which takes over all listeners and vibration
+ * control. This avoids the duplicate-VibratorEngine race condition we had before.
  */
 class VibrationDataLayerService : WearableListenerService() {
 
     companion object {
-        private const val TAG = "VibeDataLayer"
-        const val PATH_CONTROL = "/control"
-        const val KEY_MODE = "wear_mode"
-        const val KEY_LEVEL = "wear_level"
+        private const val TAG = "VibeWake"
     }
 
-    private val vibratorEngine by lazy { VibratorEngine(this) }
-
     override fun onDataChanged(dataEvents: DataEventBuffer) {
-        for (event in dataEvents) {
-            if (event.type == DataEvent.TYPE_CHANGED) {
-                val dataItem = event.dataItem
-                val path = dataItem.uri.path ?: continue
-
-                if (path == PATH_CONTROL) {
-                    val dataMap = DataMapItem.fromDataItem(dataItem).dataMap
-                    val mode = dataMap.getInt(KEY_MODE, -3)
-                    val level = dataMap.getInt(KEY_LEVEL, 0)
-
-                    Log.d(TAG, "Received control: mode=$mode, level=$level")
-                    vibratorEngine.setModeVibration(mode, level)
-                }
-            }
-        }
+        Log.d(TAG, "Wake-up via DataItem — starting foreground service")
+        startForegroundService()
         dataEvents.release()
+    }
+
+    override fun onMessageReceived(event: MessageEvent) {
+        Log.d(TAG, "Wake-up via Message: ${event.path} — starting foreground service")
+        startForegroundService()
+    }
+
+    private fun startForegroundService() {
+        // Only start if not already running — avoid redundant starts
+        // from every ping/control message after the initial wake-up
+        val manager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+        val running = manager.getRunningServices(Int.MAX_VALUE)
+            .any { it.service.className == VibrationForegroundService::class.java.name }
+        if (running) {
+            Log.d(TAG, "Foreground service already running, skipping wake-up")
+            return
+        }
+        Log.d(TAG, "Starting foreground service")
+        val intent = Intent(this, VibrationForegroundService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 }

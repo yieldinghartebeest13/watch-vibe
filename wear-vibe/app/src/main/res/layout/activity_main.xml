@@ -13,24 +13,15 @@
         android:gravity="center">
 
         <TextView
-            android:id="@+id/statusText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="WearVibe Ready"
-            android:textColor="#e0e0e0"
-            android:textSize="14sp"
-            android:gravity="center"
-            android:padding="8dp" />
-
-        <TextView
             android:id="@+id/modeText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text=""
-            android:textColor="#a0a0b0"
-            android:textSize="12sp"
+            android:text="Ready"
+            android:textColor="#e0e0e0"
+            android:textSize="16sp"
+            android:textStyle="bold"
             android:gravity="center"
-            android:padding="4dp" />
+            android:padding="8dp" />
 
         <TextView
             android:id="@+id/levelText"
@@ -38,17 +29,7 @@
             android:layout_height="wrap_content"
             android:text=""
             android:textColor="#ff8c42"
-            android:textSize="12sp"
-            android:gravity="center"
-            android:padding="4dp" />
-
-        <TextView
-            android:id="@+id/phoneText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textColor="#888"
-            android:textSize="10sp"
+            android:textSize="14sp"
             android:gravity="center"
             android:padding="4dp" />
 

@@ -45,10 +45,8 @@ class MainActivity : Activity() {
         private const val LONG_PRESS_MS = 2000L
     }
 
-    private lateinit var statusText: TextView
     private lateinit var modeText: TextView
     private lateinit var levelText: TextView
-    private lateinit var phoneText: TextView
 
     private var stemPressStart: Long = 0
     private var exitRequested: Boolean = false
@@ -60,10 +58,8 @@ class MainActivity : Activity() {
 
         setContentView(R.layout.activity_main)
 
-        statusText = findViewById(R.id.statusText)
         modeText = findViewById(R.id.modeText)
         levelText = findViewById(R.id.levelText)
-        phoneText = findViewById(R.id.phoneText)
 
         // ── Kiosk/pinned mode ──
         setupKioskMode()
@@ -195,22 +191,17 @@ class MainActivity : Activity() {
 
     // ── Display update from service broadcasts ─────────────
 
-    private fun updateDisplay(mode: Int, level: Int, intensity: Int, active: Boolean) {
-        modeText.text = MODE_LABELS[mode] ?: "Unknown"
+    private fun updateDisplay(mode: Int, level: Int, active: Boolean, phoneConnected: Boolean) {
+        // Mode text is the primary status — replaces old statusText
+        modeText.text = when {
+            !phoneConnected -> "Waiting..."
+            active -> MODE_LABELS[mode] ?: "Unknown"
+            else -> "Ready"
+        }
         levelText.text = when {
             !active -> ""
             mode == VibratorEngine.MODE_CONSTANT -> ""
             else -> LEVEL_LABELS[level.coerceIn(0, 3)]
-        }
-        statusText.text = when {
-            active && mode == VibratorEngine.MODE_CONSTANT -> "Vibrating"
-            active && mode == VibratorEngine.MODE_INTERMITTENT -> "Pulsing"
-            active && mode == VibratorEngine.MODE_RAMP -> "Ramping"
-            active && mode == VibratorEngine.MODE_BURST -> "Bursting"
-            active && mode == VibratorEngine.MODE_WAVE -> "Waving"
-            active && mode == VibratorEngine.MODE_RANDOM -> "Random"
-            !active && mode == VibratorEngine.MODE_PAUSE -> "Idle"
-            else -> "Ready"
         }
     }
 
@@ -221,9 +212,9 @@ class MainActivity : Activity() {
             if (intent?.action != VibrationForegroundService.BROADCAST_STATUS) return
             val mode = intent.getIntExtra(VibrationForegroundService.EXTRA_MODE, VibratorEngine.MODE_PAUSE)
             val level = intent.getIntExtra(VibrationForegroundService.EXTRA_LEVEL, 0)
-            val intensity = intent.getIntExtra(VibrationForegroundService.EXTRA_INTENSITY, 100)
             val active = intent.getBooleanExtra(VibrationForegroundService.EXTRA_ACTIVE, false)
-            updateDisplay(mode, level, intensity, active)
+            val phoneConnected = intent.getBooleanExtra(VibrationForegroundService.EXTRA_PHONE_CONNECTED, false)
+            updateDisplay(mode, level, active, phoneConnected)
         }
     }
 }

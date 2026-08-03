@@ -1,12 +1,13 @@
 package com.example.vibecontrol
 
 import android.animation.ObjectAnimator
-import android.animation.ValueAnimator
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.View
-import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
@@ -28,7 +29,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speedLabel: TextView
     // Animation state
     private val dotAnimators = mutableMapOf<Int, ObjectAnimator>()
-    private val pulseAnimators = mutableMapOf<Int, ValueAnimator>()
+    private val pulseRunnables = mutableMapOf<Int, PulseRunner>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var currentActiveMode: Int = -1
     private lateinit var tileMap: Map<Int, TileViews>
 
@@ -40,6 +42,7 @@ class MainActivity : AppCompatActivity() {
         val dots: ImageView,
         val pulseBackdrop: View,
         val center: View,
+        val chart: WaveformView?,
         val defaultColor: String,
         val activeColor: String
     )
@@ -57,10 +60,12 @@ class MainActivity : AppCompatActivity() {
         btnLess = findViewById(R.id.btnLess)
         speedLabel = findViewById(R.id.speedLabel)
         buildTileMap()
+        // Initialize all waveform charts at startup
+        for ((mode, tile) in tileMap) {
+            tile.chart?.setPattern(mode, 0)
+        }
         setupListeners()
         observeViewModel()
-
-        viewModel.checkWearConnection()
     }
 
     private fun buildTileMap() {
@@ -73,6 +78,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileConstantDots),
                 pulseBackdrop = findViewById(R.id.tileConstantPulseBackdrop),
                 center = findViewById(R.id.tileConstantCenter),
+                chart = findViewById(R.id.tileConstantChart),
                 defaultColor = "#8b6b6b",
                 activeColor = "#b04a4a"
             ),
@@ -84,6 +90,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileIntermittentDots),
                 pulseBackdrop = findViewById(R.id.tileIntermittentPulseBackdrop),
                 center = findViewById(R.id.tileIntermittentCenter),
+                chart = findViewById(R.id.tileIntermittentChart),
                 defaultColor = "#8b7442",
                 activeColor = "#b08a4a"
             ),
@@ -95,6 +102,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileRampDots),
                 pulseBackdrop = findViewById(R.id.tileRampPulseBackdrop),
                 center = findViewById(R.id.tileRampCenter),
+                chart = findViewById(R.id.tileRampChart),
                 defaultColor = "#4a7a7a",
                 activeColor = "#5a9a9a"
             ),
@@ -106,6 +114,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileBurstDots),
                 pulseBackdrop = findViewById(R.id.tileBurstPulseBackdrop),
                 center = findViewById(R.id.tileBurstCenter),
+                chart = findViewById(R.id.tileBurstChart),
                 defaultColor = "#6b5b8b",
                 activeColor = "#8b6bab"
             ),
@@ -117,6 +126,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileWaveDots),
                 pulseBackdrop = findViewById(R.id.tileWavePulseBackdrop),
                 center = findViewById(R.id.tileWaveCenter),
+                chart = findViewById(R.id.tileWaveChart),
                 defaultColor = "#4a6a8a",
                 activeColor = "#5a8aaa"
             ),
@@ -128,6 +138,7 @@ class MainActivity : AppCompatActivity() {
                 dots = findViewById(R.id.tileRandomDots),
                 pulseBackdrop = findViewById(R.id.tileRandomPulseBackdrop),
                 center = findViewById(R.id.tileRandomCenter),
+                chart = null,
                 defaultColor = "#4a7a5a",
                 activeColor = "#5a9a6a"
             )
@@ -190,7 +201,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
-            viewModel.wearConnected.collectLatest { connected ->
+            viewModel.watchConnected.collectLatest { connected ->
                 wearStatus.text = if (connected) "Connected" else "No watch connected"
             }
         }
@@ -215,10 +226,10 @@ class MainActivity : AppCompatActivity() {
                 highlightActiveMode(mode)
             }
         }
-        // Restart animation when level changes and a mode is active
         lifecycleScope.launch {
             viewModel.level.collectLatest { level ->
                 if (currentActiveMode != -1) {
+                    tileMap[currentActiveMode]?.chart?.setPattern(currentActiveMode, level)
                     startTileAnimation(currentActiveMode, level)
                 }
             }
@@ -227,55 +238,90 @@ class MainActivity : AppCompatActivity() {
 
     // ── Animation methods ──
 
-    private fun getBeatPeriodMs(mode: Int, level: Int): Long {
+    /** Exact cycle duration matching the watch VibratorEngine. */
+    private fun getCycleMs(mode: Int, level: Int): Long {
         return when (mode) {
-            MainViewModel.MODE_CONSTANT -> 5000L
-            MainViewModel.MODE_INTERMITTENT -> when (level) {
-                0 -> 1000L
-                1 -> 500L
-                2 -> 250L
-                3 -> 150L
-                else -> 1000L
+            MainViewModel.MODE_CONSTANT -> 1000L
+            MainViewModel.MODE_INTERMITTENT -> {
+                val (on, off) = when (level.coerceIn(0, 3)) {
+                    0 -> 700L to 300L
+                    1 -> 228L to 97L
+                    2 -> 140L to 60L
+                    3 -> 88L to 37L
+                    else -> 700L to 300L
+                }
+                on + off  // single on-off pair, matching watch vibrate() cycle
             }
-            MainViewModel.MODE_RAMP -> when (level) {
-                0 -> 2000L
-                1 -> 1300L
-                2 -> 800L
-                3 -> 500L
-                else -> 2000L
+            MainViewModel.MODE_RAMP -> when (level.coerceIn(0, 3)) {
+                0 -> 200L; 1 -> 130L; 2 -> 80L; 3 -> 50L; else -> 200L
+            } * 5
+            MainViewModel.MODE_BURST -> {
+                val (tap, pause) = when (level.coerceIn(0, 3)) {
+                    0 -> 140L to 300L
+                    1 -> 90L to 195L
+                    2 -> 55L to 120L
+                    3 -> 35L to 75L
+                    else -> 140L to 300L
+                }
+                tap * 5 + pause
             }
-            MainViewModel.MODE_WAVE -> when (level) {
-                0 -> 315L
-                1 -> 220L
-                2 -> 150L
-                3 -> 98L
-                else -> 315L
-            }
-            MainViewModel.MODE_RANDOM -> when (level) {
-                0 -> 550L
-                1 -> 360L
-                2 -> 205L
-                3 -> 116L
-                else -> 550L
-            }
-            MainViewModel.MODE_BURST -> when (level) {
-                0 -> 1150L
-                1 -> 850L
-                2 -> 650L
-                3 -> 500L
-                else -> 1150L
+            MainViewModel.MODE_WAVE -> when (level.coerceIn(0, 3)) {
+                0 -> 50L; 1 -> 32L; 2 -> 20L; 3 -> 12L; else -> 50L
+            } * 20
+            MainViewModel.MODE_RANDOM -> when (level.coerceIn(0, 3)) {
+                0 -> 1000L; 1 -> 650L; 2 -> 400L; 3 -> 250L; else -> 1000L
             }
             else -> 1000L
         }
     }
 
+    /** Return raw vibration amplitude (0 or 1, or fractional for wave/ramp)
+     * at a given fraction through the cycle. Smoothing applied in the animator. */
+    private fun getAmplitudeAtFraction(mode: Int, level: Int, fraction: Float): Float {
+        val f = fraction - fraction.toInt().toFloat()
+        return when (mode) {
+            MainViewModel.MODE_CONSTANT -> 1.0f
+            MainViewModel.MODE_INTERMITTENT -> {
+                // duty cycle matches watch: on/(on+off)
+                val duty = when (level.coerceIn(0, 3)) {
+                    0 -> 0.700f  // 700/1000
+                    1 -> 0.702f  // 228/325
+                    2 -> 0.700f  // 140/200
+                    3 -> 0.704f  // 88/125
+                    else -> 0.700f
+                }
+                if (f < duty) 1f else 0f
+            }
+            MainViewModel.MODE_RAMP -> {
+                val step = (f * 6f).toInt()
+                if (step < 5) (step + 1f) / 5f else 0f
+            }
+            MainViewModel.MODE_BURST -> {
+                // 3 taps at [0,.14) [.28,.42) [.56,.70), pause [.70,1.0)
+                if (f < 0.14f) 1f
+                else if (f < 0.28f) 0f
+                else if (f < 0.42f) 1f
+                else if (f < 0.56f) 0f
+                else if (f < 0.70f) 1f
+                else 0f
+            }
+            MainViewModel.MODE_WAVE -> {
+                (Math.sin(-Math.PI / 2 + 2 * Math.PI * f).toFloat() + 1f) / 2f
+            }
+            MainViewModel.MODE_RANDOM -> {
+                if (f < 0.5f) f * 2f else (1f - f) * 2f
+            }
+            else -> 0.5f
+        }
+    }
+
     private fun startTileAnimation(mode: Int, level: Int) {
         val tile = tileMap[mode] ?: return
-        val periodMs = getBeatPeriodMs(mode, level)
+        val periodMs = getCycleMs(mode, level)
 
         // Stop previous animation on same tile if restarting (level change)
         dotAnimators[mode]?.cancel()
-        pulseAnimators[mode]?.cancel()
+        pulseRunnables[mode]?.cancel()
 
         // Show active state
         tile.title.visibility = View.GONE
@@ -291,31 +337,18 @@ class MainActivity : AppCompatActivity() {
         }
         dotAnimators[mode] = dotRotation
 
-        // Pulse animation for backdrop and center
-        val pulseAnim = ValueAnimator.ofFloat(0.3f, 1.0f, 0.3f).apply {
-            duration = periodMs
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = AccelerateDecelerateInterpolator()
-            addUpdateListener { anim ->
-                val fraction = anim.animatedValue as Float
-                tile.pulseBackdrop.alpha = fraction * 0.4f
-                val scale = 1.0f + (fraction - 0.3f) * 0.5f
-                tile.pulseBackdrop.scaleX = scale
-                tile.pulseBackdrop.scaleY = scale
-                tile.center.scaleX = 1.0f + (fraction - 0.3f) * 0.2f
-                tile.center.scaleY = 1.0f + (fraction - 0.3f) * 0.2f
-            }
-            start()
-        }
-        pulseAnimators[mode] = pulseAnim
+        // Pulse animation — uses system clock for accurate timing
+        val pulseStart = SystemClock.elapsedRealtime()
+        val runner = PulseRunner(tile, mode, level, periodMs, pulseStart)
+        pulseRunnables[mode] = runner
+        mainHandler.post(runner)
     }
 
     private fun stopTileAnimation(mode: Int) {
         val tile = tileMap[mode] ?: return
         dotAnimators[mode]?.cancel()
-        pulseAnimators[mode]?.cancel()
         dotAnimators.remove(mode)
-        pulseAnimators.remove(mode)
+        pulseRunnables.remove(mode)?.cancel()
 
         tile.title.visibility = View.VISIBLE
         tile.activeContainer.visibility = View.GONE
@@ -351,15 +384,66 @@ class MainActivity : AppCompatActivity() {
 
         currentActiveMode = mode
         val level = viewModel.level.value
+        tileMap[mode]?.chart?.setPattern(mode, level)
         startTileAnimation(mode, level)
+    }
+
+    // ── PulseRunner: time-based animation loop ──
+
+    private inner class PulseRunner(
+        private val tile: TileViews,
+        private val mode: Int,
+        private val level: Int,
+        private val periodMs: Long,
+        private val startTime: Long
+    ) : Runnable {
+        @Volatile var cancelled = false
+        private var prevAmp = 0.3f
+
+        override fun run() {
+            if (cancelled) return
+            val elapsed = SystemClock.elapsedRealtime() - startTime
+            val fraction = ((elapsed % periodMs).toFloat() / periodMs.toFloat())
+            val target = getAmplitudeAtFraction(mode, level, fraction)
+            // Light smoothing to avoid jitter, but fast enough for short cycles
+            prevAmp = prevAmp + (target - prevAmp) * 0.9f
+            val amp = prevAmp
+            val f = 0.3f + amp * 0.7f
+            tile.pulseBackdrop.alpha = f * 0.4f
+            val scale = 1.0f + (f - 0.3f) * 0.5f
+            tile.pulseBackdrop.scaleX = scale
+            tile.pulseBackdrop.scaleY = scale
+            tile.center.scaleX = 1.0f + (f - 0.3f) * 0.2f
+            tile.center.scaleY = 1.0f + (f - 0.3f) * 0.2f
+            mainHandler.postDelayed(this, 16L) // ~60 fps
+        }
+
+        fun cancel() {
+            cancelled = true
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.startHeartbeat()
+        viewModel.startConnectionMonitor()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.stopHeartbeat()
+        viewModel.stopConnectionMonitor()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // Cancel all animators
         for ((mode, _) in dotAnimators) {
-            stopTileAnimation(mode)
+            dotAnimators[mode]?.cancel()
         }
+        for ((_, runner) in pulseRunnables) {
+            runner.cancel()
+        }
+        pulseRunnables.clear()
         viewModel.modeStop()
     }
 }
