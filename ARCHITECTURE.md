@@ -21,8 +21,8 @@ Two companion apps that control a watch's vibration motor from your phone.
 │             │                            │     │                 │ broadcasts       │
 │  ┌──────────▼─────────────────────────┐  │     │  ┌──────────────▼───────────────┐  │
 │  │ MainViewModel                      │  │     │  │ MainActivity (KIOSK MODE)    │  │
-│  │  mode, level                       │  │     │  │  Mode name as primary status  │  │
-│  │  Heartbeat (1s, dual-transport)    │  │     │  │  Speed label below            │  │
+│  │  mode, level (SavedStateHandle)    │  │     │  │  Mode name as primary status  │  │
+│  │  Heartbeat (mode-aware, bg-safe)   │  │     │  │  Speed label below            │  │
 │  │  CapabilityClient.addListener      │  │     │  │  All touch/back blocked       │  │
 │  └──────────┬─────────────────────────┘  │     │  │  Crown long-press to exit     │  │
 │             │                            │     │  └──────────────────────────────┘  │
@@ -112,7 +112,53 @@ This prevents two problems:
 DataItem queue depth is naturally 1 per path (`putDataItem` overwrites).
 Messages have no queue — they fail fast if the node is unreachable.
 
-### 6. Auto-start on watch
+### 6. Session ID (cross-session isolation)
+
+Every ping carries a `sessionId` (phone-side `System.currentTimeMillis()` at
+`WearDataLayer` construction — i.e. every app launch). The watch tracks
+`lastSessionId`.
+
+When the watch detects a new session:
+- Resets `lastPingCounter` to -1 — the new session's counter starts from 0,
+  which would otherwise be rejected by the old `> lastPingCounter` check.
+- Resets `lastCommandTimestamp` to 0 — suppresses auto-resume. A fresh phone
+  session should never restart the previous session's vibration.
+
+This also fixes the phone close/reopen problem: without sessionId, the
+resetting `pingCounter` caused all new-session pings to be silently dropped.
+
+### 7. Phone state persistence
+
+`MainViewModel` uses `SavedStateHandle` to persist `mode` and `level` across
+process death. When Android kills the background process and recreates it,
+the UI restores the last active tile and re-sends the command to the watch
+(the watch's dedup guard handles the already-active case).
+
+`MainActivity` uses `launchMode="singleTask"` to prevent duplicate Activity
+instances when the user taps the launcher icon. Without it, Android's default
+`standard` mode creates a second task with a fresh ViewModel (no saved state),
+while the original task with the real state sits in the background.
+
+### 8. Background heartbeat policy
+
+The heartbeat is mode-aware — it only runs in the background when protecting
+an active vibration:
+
+| App state | Mode active? | Heartbeat | Reason |
+|-----------|-------------|-----------|--------|
+| Foreground | Yes | ✅ Running | UI needs live status |
+| Foreground | No (STOP) | ✅ Running | UI shows "Ready" vs "Waiting..." |
+| Background | Yes | ✅ Running | Protects watch from disconnect |
+| Background | No (STOP) | ❌ Stopped | Battery — nothing to protect |
+| Explicitly closed | Any | ❌ Stopped | Process killed or finishing |
+
+`onPause()` no longer unconditionally stops the heartbeat. Instead,
+`onBackground()` checks the current mode — if a vibration is active,
+the heartbeat keeps running even with the screen off or the app switched
+out. When the user stops vibration while backgrounded, the heartbeat stops
+to save battery.
+
+### 9. Auto-start on watch
 
 Three layers:
 - **BootReceiver**: starts foreground service after reboot
@@ -205,6 +251,9 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 | Vibration lease | Extended by pings; zeroed by STOP; drives auto-resume | — |
 | UI connection status | Derived from connectionLease (`connectionLeaseExpiry > now`) | — |
 | Command TTL | Discards commands older than 30s or out-of-order | Commands carry timestamps |
+| Session ID | Resets counter baseline, suppresses cross-session auto-resume | Generated each app launch |
+| State persistence | SavedStateHandle restores mode/level after process death | singleTask launch mode |
+| Background heartbeat | Mode-aware: runs in background only when vibration active | onBackground() checks mode |
 | Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
 | Boot | BootReceiver starts FGS | — |
 
@@ -220,7 +269,7 @@ app/src/main/
 ├── java/com/example/vibecontrol/
 │   ├── AppConstants.kt       # Shared constants (identical in both projects)
 │   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient
-│   ├── MainViewModel.kt      # State + heartbeat + CapabilityClient listener
+│   ├── MainViewModel.kt      # State + mode-aware heartbeat + SavedStateHandle
 │   ├── MainActivity.kt       # 6-tile UI + waveform animations + controls
 │   └── WaveformView.kt       # Mini waveform chart per tile (bitmap-cached)
 └── res/
