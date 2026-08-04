@@ -39,8 +39,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
     private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
+    private var isInForeground: Boolean = false
 
-    fun startHeartbeat() {
+    /** Called when the activity comes to the foreground. */
+    fun onForeground() {
+        isInForeground = true
+        startHeartbeat()
+        startConnectionMonitor()
+    }
+
+    /**
+     * Called when the activity goes to the background.
+     * Only stops the heartbeat if no vibration is active — if the user
+     * put the phone away while vibrating, pings must continue so the
+     * watch doesn't trigger a disconnect.
+     */
+    fun onBackground() {
+        isInForeground = false
+        if (_mode.value == AppConstants.MODE_STOP || _mode.value == AppConstants.MODE_PAUSE) {
+            stopHeartbeat()
+            stopConnectionMonitor()
+        }
+    }
+
+    private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = viewModelScope.launch {
             while (isActive) {
@@ -140,11 +162,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
             _isVibrating.value = false
             _statusText.value = "Ready"
+            // If the user stops vibration while the app is in the background,
+            // there's no reason to keep the heartbeat alive.
+            if (!isInForeground) {
+                stopHeartbeat()
+                stopConnectionMonitor()
+            }
         } else {
             _isVibrating.value = true
             val modeLabel = AppConstants.MODE_LABELS[currentMode] ?: "Unknown"
             val speedLabel = AppConstants.SPEED_LABELS[currentLevel]
             _statusText.value = "$modeLabel - $speedLabel"
+            // Ensure heartbeat runs even if the user activated this from
+            // a notification or the app is otherwise backgrounded.
+            if (!isInForeground) {
+                startHeartbeat()
+            }
         }
 
         viewModelScope.launch {

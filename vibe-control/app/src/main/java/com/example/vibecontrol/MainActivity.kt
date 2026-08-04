@@ -356,14 +356,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.startHeartbeat()
-        viewModel.startConnectionMonitor()
+        viewModel.onForeground()
     }
 
     override fun onPause() {
         super.onPause()
-        viewModel.stopHeartbeat()
-        viewModel.stopConnectionMonitor()
+        viewModel.onBackground()
     }
 
     override fun onDestroy() {
@@ -371,6 +369,10 @@ class MainActivity : AppCompatActivity() {
         for ((mode, _) in dotAnimators) dotAnimators[mode]?.cancel()
         for ((_, runner) in pulseRunnables) runner.cancel()
         pulseRunnables.clear()
+        // Stop vibration and heartbeat when the user explicitly closes the app.
+        // modeStop() sends STOP to watch; onCleared() will do final cleanup.
         viewModel.modeStop()
+        viewModel.stopHeartbeat()
+        viewModel.stopConnectionMonitor()
     }
 }
