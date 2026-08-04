@@ -19,6 +19,9 @@ class WearDataLayer(context: Context) {
     private val capabilityClient: CapabilityClient = Wearable.getCapabilityClient(context)
     private val nodeClient: NodeClient = Wearable.getNodeClient(context)
 
+    // Session ID changes on every app launch. The watch uses it to detect
+    // fresh sessions: counter reset is expected, auto-resume is suppressed.
+    private val sessionId: Long = System.currentTimeMillis()
     private var pingCounter: Long = 0
 
     companion object {
@@ -76,6 +79,7 @@ class WearDataLayer(context: Context) {
                 val request = PutDataMapRequest.create(AppConstants.PATH_PING).apply {
                     dataMap.putLong("timestamp", ts)
                     dataMap.putLong("counter", count)
+                    dataMap.putLong("sessionId", sessionId)
                 }
                 request.setUrgent()
                 dataClient.putDataItem(request.asPutDataRequest()).await()
@@ -86,7 +90,7 @@ class WearDataLayer(context: Context) {
             // Also send via Message (lower latency, real-time channel)
             try {
                 val nodes = nodeClient.connectedNodes.await()
-                val payload = "$count,$ts".toByteArray()
+                val payload = "$count,$ts,$sessionId".toByteArray()
                 for (node in nodes) {
                     try {
                         messageClient.sendMessage(node.id, AppConstants.PATH_PING, payload).await()

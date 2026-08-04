@@ -64,6 +64,7 @@ class VibrationForegroundService : Service() {
     @Volatile private var connectionLeaseExpiry: Long = 0
     @Volatile private var vibrationLeaseExpiry: Long = 0
     @Volatile private var lastPingCounter: Long = -1
+    @Volatile private var lastSessionId: Long = 0
     @Volatile private var lastCommandTimestamp: Long = 0
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
@@ -189,8 +190,8 @@ class VibrationForegroundService : Service() {
                     AppConstants.PATH_PING -> {
                         val map = DataMapItem.fromDataItem(item).dataMap
                         val counter = map.getLong("counter", -1)
-                        if (counter > lastPingCounter) {
-                            lastPingCounter = counter
+                        val sid = map.getLong("sessionId", 0L)
+                        if (handlePing(counter, sid)) {
                             extendLease()
                         }
                     }
@@ -275,8 +276,8 @@ class VibrationForegroundService : Service() {
                     val body = String(event.data)
                     val parts = body.split(",")
                     val counter = parts.getOrNull(0)?.toLongOrNull() ?: -1
-                    if (counter > lastPingCounter) {
-                        lastPingCounter = counter
+                    val sid = parts.getOrNull(2)?.toLongOrNull() ?: 0L
+                    if (handlePing(counter, sid)) {
                         extendLease()
                     }
                 }
@@ -368,6 +369,26 @@ class VibrationForegroundService : Service() {
             }
             broadcastStatus()
         }
+    }
+
+    /**
+     * Process an incoming ping. Returns true if the lease should be extended.
+     * Handles session changes: a new sessionId resets the counter baseline
+     * and suppresses auto-resume (new session = don't restart old vibration).
+     */
+    private fun handlePing(counter: Long, sessionId: Long): Boolean {
+        if (sessionId > 0 && sessionId != lastSessionId) {
+            // New phone session — reset expectations
+            Log.d(TAG, "New session detected (sid=$sessionId, was=$lastSessionId) — resetting state")
+            lastSessionId = sessionId
+            lastPingCounter = -1
+            lastCommandTimestamp = 0  // suppress auto-resume for old vibration
+        }
+        if (counter > lastPingCounter) {
+            lastPingCounter = counter
+            return true
+        }
+        return false
     }
 
     /** Returns true if the command timestamp is too old to process. */
