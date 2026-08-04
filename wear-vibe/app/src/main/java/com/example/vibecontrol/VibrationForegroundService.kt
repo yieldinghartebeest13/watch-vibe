@@ -55,8 +55,13 @@ class VibrationForegroundService : Service() {
     private var lastMode: Int = AppConstants.MODE_PAUSE
     private var lastLevel: Int = 0
     private var lastIntensity: Int = 100
-    // Lease model: vibration expires automatically unless pings extend it.
-    // Fails-safe — if the heartbeat mechanism breaks, vibration stops.
+    // Dual-lease model (fails-safe):
+    // - connectionLeaseExpiry: extended by every ping & command. Drives UI status.
+    //   NEVER zeroed by STOP — only by disconnect or natural expiry.
+    // - vibrationLeaseExpiry: extended by pings, set by non-STOP commands,
+    //   zeroed by STOP/PAUSE. Drives vibration cancellation.
+    // If connection lease expires → vibration lease also expires → cancel.
+    @Volatile private var connectionLeaseExpiry: Long = 0
     @Volatile private var vibrationLeaseExpiry: Long = 0
     @Volatile private var lastPingCounter: Long = -1
     private var heartbeatChecker: Job? = null
@@ -260,15 +265,16 @@ class VibrationForegroundService : Service() {
             Log.d(TAG, "Capability changed: ${nodes.size} nodes (was=$wasConnected now=$phoneConnected)")
 
             if (phoneConnected) {
-                // Phone just appeared — give the lease a fresh start
+                // Phone just appeared — give leases a fresh start
                 // so pings have time to arrive before expiry.
                 extendLease()
             }
 
             if (wasConnected && !phoneConnected) {
-                // Fast-path: phone gone → kill vibration immediately.
+                // Fast-path: phone gone → kill both leases immediately.
                 // The lease expiry is the safety net if this doesn't fire.
                 Log.d(TAG, "Phone disconnected → stopping vibration")
+                connectionLeaseExpiry = 0
                 vibrationLeaseExpiry = 0
                 vibratorEngine.cancel()
                 broadcastStatus()
@@ -293,27 +299,32 @@ class VibrationForegroundService : Service() {
             while (isActive) {
                 delay(1000)
                 val now = System.currentTimeMillis()
-                // Dead man's switch: if the lease expired while vibrating,
-                // the phone is gone — cancel immediately. No explicit
-                // disconnect signal needed. This is fails-safe by design.
-                if (vibratorEngine.vibrating && vibrationLeaseExpiry > 0 && now > vibrationLeaseExpiry) {
-                    Log.w(TAG, "Vibration LEASE EXPIRED — lease ran out → cancelling")
+                // Dead man's switch: if the connection lease expired,
+                // the phone is gone. Zero both leases, cancel vibration,
+                // and update UI. No explicit disconnect signal needed.
+                if (connectionLeaseExpiry > 0 && now > connectionLeaseExpiry) {
+                    Log.w(TAG, "Connection LEASE EXPIRED → cancelling everything")
+                    connectionLeaseExpiry = 0
                     vibrationLeaseExpiry = 0
-                    vibratorEngine.cancel()
+                    if (vibratorEngine.vibrating) {
+                        vibratorEngine.cancel()
+                    }
                     broadcastStatus()
                 }
             }
         }
     }
 
-    /** Extend the vibration lease — called on every heartbeat ping. */
+    /** Extend both leases — called on every heartbeat ping. */
     private fun extendLease() {
         val wasExpired = vibrationLeaseExpiry <= System.currentTimeMillis()
-        vibrationLeaseExpiry = System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
+        val now = System.currentTimeMillis()
+        connectionLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
+        vibrationLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
         if (wasExpired) {
-            // Lease just revived — auto-resume vibration if we were active
+            // Vibration lease just revived — auto-resume if we were active
             // before the disconnect, and update the UI.
-            Log.d(TAG, "Lease revived — was expired, now current")
+            Log.d(TAG, "Vibration lease revived — was expired, now current")
             if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
                 Log.d(TAG, "Auto-resuming vibration mode=$lastMode")
                 vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
@@ -322,8 +333,13 @@ class VibrationForegroundService : Service() {
         }
     }
 
-    /** Renew the lease if the command starts vibration; zero it if it stops. */
+    /**
+     * Called on every control command. Connection lease always gets a fresh
+     * extension (a command arriving proves the phone is connected). Vibration
+     * lease is set for modes that start vibration, zeroed for STOP/PAUSE.
+     */
     private fun renewLeaseIfActive(mode: Int) {
+        connectionLeaseExpiry = System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
         vibrationLeaseExpiry = if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
             0L
         } else {
@@ -352,12 +368,12 @@ class VibrationForegroundService : Service() {
         }
     }
 
-    /** Whether the heartbeat lease is current (pings are flowing). */
-    private fun isLeaseCurrent(): Boolean =
-        vibrationLeaseExpiry > System.currentTimeMillis()
+    /** Whether the connection lease is current (pings are flowing). */
+    private fun isConnected(): Boolean =
+        connectionLeaseExpiry > System.currentTimeMillis()
 
     private fun broadcastStatus() {
-        val connected = isLeaseCurrent()
+        val connected = isConnected()
         val intent = Intent(BROADCAST_STATUS).apply {
             setPackage(packageName)
             putExtra(EXTRA_MODE, vibratorEngine.mode)
@@ -418,7 +434,7 @@ class VibrationForegroundService : Service() {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("Vibration Control")
-                .setContentText(if (isLeaseCurrent()) "Connected to phone" else "Waiting for phone")
+                .setContentText(if (isConnected()) "Connected to phone" else "Waiting for phone")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
@@ -428,7 +444,7 @@ class VibrationForegroundService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
                 .setContentTitle("Vibration Control")
-                .setContentText(if (isLeaseCurrent()) "Connected to phone" else "Waiting for phone")
+                .setContentText(if (isConnected()) "Connected to phone" else "Waiting for phone")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
