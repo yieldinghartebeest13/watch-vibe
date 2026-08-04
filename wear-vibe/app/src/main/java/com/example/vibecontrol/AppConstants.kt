@@ -44,6 +44,13 @@ object AppConstants {
     // cancels itself automatically — no explicit cancel needed.
     const val VIBRATION_LEASE_MS = 3_000L
 
+    // ── Command expiry ─────────────────────────────────────
+    // Commands older than this are discarded on arrival.
+    // Prevents rapid mode-cycling on reconnect when the user
+    // mashed buttons while disconnected.
+    const val COMMAND_TTL_MS = 30_000L
+    const val KEY_TIMESTAMP = "ts"
+
     // ── Labels ─────────────────────────────────────────────
     val SPEED_LABELS = arrayOf("Slow", "Medium", "Fast", "Very Fast")
 

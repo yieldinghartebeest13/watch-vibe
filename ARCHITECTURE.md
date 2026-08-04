@@ -65,27 +65,54 @@ Every command is processed immediately. `VibratorEngine.setModeVibration()` dedu
 if (mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
 ```
 
-### 4. Renewable vibration lease (dead-man's switch)
+### 4. Dual-lease model (dead-man's switch)
+
+Two independent renewable leases replace a single timeout:
+
+| Lease | Extended by | Zeroed by | Drives |
+|-------|------------|-----------|--------|
+| **connectionLease** | pings, any control command, capability reconnect | disconnect, natural expiry | UI status, notification text |
+| **vibrationLease** | pings, non-STOP commands | STOP/PAUSE commands, disconnect, connection expiry | vibration cancellation, auto-resume |
 
 Phone pings `/ping` every 1s via both DataClient and MessageClient (dual-transport
-redundancy). Each ping extends the watch's vibration lease by `VIBRATION_LEASE_MS`
-(3s). A control command also sets a fresh lease on start, or zeros it on stop.
+redundancy). Each ping extends both leases by `VIBRATION_LEASE_MS` (3s).
 
-If the lease expires (no ping for 3s), vibration cancels itself automatically —
-no explicit disconnect signal needed. This is **fails-safe by design**: if the
-heartbeat mechanism breaks entirely, vibration stops within 3 seconds. It is
-structurally impossible for the watch to vibrate indefinitely without the phone.
+Key property: **STOP zeroes vibrationLease but NOT connectionLease**. The UI
+shows "Ready" (connected, not vibrating) instead of "Waiting..." (disconnected).
 
 **Two-layer disconnect detection:**
-1. **CapabilityClient listener** → fast-path: zeroes lease and cancels vibration
-   immediately when the phone node disappears. Sub-second reaction.
-2. **Lease expiry** → safety net: if the capability listener doesn't fire (silent
-   disconnect, transport glitch), the lease expires in 3s and vibration stops.
+1. **CapabilityClient listener** → fast-path: zeroes both leases and cancels
+   vibration immediately when the phone node disappears. Sub-second reaction.
+2. **Connection lease expiry** → safety net: if the capability listener doesn't
+   fire (silent disconnect), the lease expires in 3s, both leases zeroed,
+   vibration cancelled. This is **fails-safe by design** — if the heartbeat
+   mechanism breaks entirely, vibration stops within 3 seconds.
 
-The UI connection status reads the same lease value — the display and the actual
-function can never diverge.
+**Auto-resume**: when the vibration lease revives from expired (pings resume),
+the watch restarts the last active mode — but only if the disconnect was
+shorter than `COMMAND_TTL_MS` (30s). Longer disconnects suppress auto-resume.
 
-### 5. Auto-start on watch
+The UI, notification, and vibration control all derive from the same lease
+values — display and function can never diverge.
+
+### 5. Command TTL and deduplication
+
+Every control command carries a `System.currentTimeMillis()` timestamp. The
+watch discards any command older than `COMMAND_TTL_MS` (30s) or older than
+the last processed command (out-of-order delivery).
+
+This prevents two problems:
+- **Stale re-delivery**: a cached DataItem from a long-ago tap doesn't
+  suddenly restart vibration on reconnect.
+- **Rapid cycling**: if the user mashed buttons while disconnected, only
+  the freshest command survives (DataItem overwrites at the same path;
+  Messages aren't queued). Out-of-order arrival is caught by timestamp
+  comparison.
+
+DataItem queue depth is naturally 1 per path (`putDataItem` overwrites).
+Messages have no queue — they fail fast if the node is unreachable.
+
+### 6. Auto-start on watch
 
 Three layers:
 - **BootReceiver**: starts foreground service after reboot
@@ -174,8 +201,10 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 |-------|-------|-------|
 | CapabilityClient listener | Detects phone presence → immediate cancel | Detects watch capability |
 | Heartbeat ping (dual) | Phone → watch every 1s via DataClient + MessageClient | Phone sends |
-| Lease expiry (safety net) | 3s after last ping → vibration cancels itself | N/A |
-| UI connection status | Derived from lease (`vibrationLeaseExpiry > now`) | — |
+| Connection lease expiry (safety net) | 3s after last ping → both leases zeroed, cancel | N/A |
+| Vibration lease | Extended by pings; zeroed by STOP; drives auto-resume | — |
+| UI connection status | Derived from connectionLease (`connectionLeaseExpiry > now`) | — |
+| Command TTL | Discards commands older than 30s or out-of-order | Commands carry timestamps |
 | Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
 | Boot | BootReceiver starts FGS | — |
 

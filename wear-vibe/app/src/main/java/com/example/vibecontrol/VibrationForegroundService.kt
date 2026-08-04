@@ -64,6 +64,7 @@ class VibrationForegroundService : Service() {
     @Volatile private var connectionLeaseExpiry: Long = 0
     @Volatile private var vibrationLeaseExpiry: Long = 0
     @Volatile private var lastPingCounter: Long = -1
+    @Volatile private var lastCommandTimestamp: Long = 0
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
 
@@ -150,9 +151,22 @@ class VibrationForegroundService : Service() {
                         val mode = map.getInt(AppConstants.KEY_MODE, AppConstants.MODE_PAUSE)
                         val level = map.getInt(AppConstants.KEY_LEVEL, 0)
                         val intensity = map.getInt(AppConstants.KEY_INTENSITY, 100)
+                        val ts = map.getLong(AppConstants.KEY_TIMESTAMP, 0L)
+
+                        if (isStaleCommand(ts)) {
+                            Log.d(TAG, "Ignoring stale DataItem: mode=$mode (${System.currentTimeMillis() - ts}ms old)")
+                            if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
+                                try {
+                                    Wearable.getDataClient(this@VibrationForegroundService)
+                                        .deleteDataItems(item.uri)
+                                } catch (_: Exception) {}
+                            }
+                            continue
+                        }
 
                         Log.d(TAG, "DataItem: mode=$mode level=$level intensity=$intensity")
                         lastMode = mode; lastLevel = level; lastIntensity = intensity
+                        lastCommandTimestamp = ts
                         vibratorEngine.setModeVibration(mode, level, intensity)
                         renewLeaseIfActive(mode)
                         broadcastStatus()
@@ -198,6 +212,7 @@ class VibrationForegroundService : Service() {
                     val mode: Int
                     val level: Int
                     val intensity: Int
+                    val ts: Long
                     when (parts.size) {
                         2 -> {
                             mode = parts[0].toIntOrNull() ?: run {
@@ -208,7 +223,7 @@ class VibrationForegroundService : Service() {
                                 Log.w(TAG, "Malformed message (non-numeric level): $body")
                                 return@OnMessageReceivedListener
                             }
-                            intensity = 100
+                            intensity = 100; ts = 0L  // legacy: no timestamp
                         }
                         3 -> {
                             mode = parts[0].toIntOrNull() ?: run {
@@ -220,6 +235,19 @@ class VibrationForegroundService : Service() {
                                 return@OnMessageReceivedListener
                             }
                             intensity = parts[2].toIntOrNull() ?: 100
+                            ts = 0L  // legacy: no timestamp
+                        }
+                        4 -> {
+                            mode = parts[0].toIntOrNull() ?: run {
+                                Log.w(TAG, "Malformed message (non-numeric mode): $body")
+                                return@OnMessageReceivedListener
+                            }
+                            level = parts[1].toIntOrNull() ?: run {
+                                Log.w(TAG, "Malformed message (non-numeric level): $body")
+                                return@OnMessageReceivedListener
+                            }
+                            intensity = parts[2].toIntOrNull() ?: 100
+                            ts = parts[3].toLongOrNull() ?: 0L
                         }
                         else -> {
                             Log.w(TAG, "Malformed message (unexpected parts=${parts.size}): $body")
@@ -227,8 +255,14 @@ class VibrationForegroundService : Service() {
                         }
                     }
 
+                    if (isStaleCommand(ts)) {
+                        Log.d(TAG, "Ignoring stale message: mode=$mode (${System.currentTimeMillis() - ts}ms old)")
+                        return@OnMessageReceivedListener
+                    }
+
                     Log.d(TAG, "Message: mode=$mode level=$level intensity=$intensity")
                     lastMode = mode; lastLevel = level; lastIntensity = intensity
+                    lastCommandTimestamp = ts
                     vibratorEngine.setModeVibration(mode, level, intensity)
                     renewLeaseIfActive(mode)
                     broadcastStatus()
@@ -323,14 +357,27 @@ class VibrationForegroundService : Service() {
         vibrationLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
         if (wasExpired) {
             // Vibration lease just revived — auto-resume if we were active
-            // before the disconnect, and update the UI.
-            Log.d(TAG, "Vibration lease revived — was expired, now current")
-            if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
+            // before the disconnect AND the disconnect was recent enough.
+            val disconnectedMs = if (lastCommandTimestamp > 0) now - lastCommandTimestamp else Long.MAX_VALUE
+            Log.d(TAG, "Vibration lease revived — was expired, now current (disconnected ${disconnectedMs}ms)")
+            if (disconnectedMs < AppConstants.COMMAND_TTL_MS
+                && lastMode != AppConstants.MODE_STOP
+                && lastMode != AppConstants.MODE_PAUSE) {
                 Log.d(TAG, "Auto-resuming vibration mode=$lastMode")
                 vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
             }
             broadcastStatus()
         }
+    }
+
+    /** Returns true if the command timestamp is too old to process. */
+    private fun isStaleCommand(ts: Long): Boolean {
+        if (ts <= 0) return false  // legacy command without timestamp — accept
+        val age = System.currentTimeMillis() - ts
+        if (age > AppConstants.COMMAND_TTL_MS) return true
+        // Also reject if older than the last processed command (out-of-order delivery)
+        if (ts <= lastCommandTimestamp) return true
+        return false
     }
 
     /**

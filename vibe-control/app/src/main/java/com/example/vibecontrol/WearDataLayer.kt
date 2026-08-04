@@ -37,12 +37,15 @@ class WearDataLayer(context: Context) {
                     Log.w(TAG, "No Wear nodes connected — data won't reach watch!")
                 }
 
+                val ts = System.currentTimeMillis()
+
                 // Send via DataItem with retry
                 retryWithDelay(2, 300) {
                     val request = PutDataMapRequest.create(AppConstants.PATH_CONTROL).apply {
                         dataMap.putInt(AppConstants.KEY_MODE, mode)
                         dataMap.putInt(AppConstants.KEY_LEVEL, level)
                         dataMap.putInt(AppConstants.KEY_INTENSITY, intensity)
+                        dataMap.putLong(AppConstants.KEY_TIMESTAMP, ts)
                     }
                     request.setUrgent()
                     val result = dataClient.putDataItem(request.asPutDataRequest()).await()
@@ -50,7 +53,7 @@ class WearDataLayer(context: Context) {
                 }
 
                 // Also send via Message API (more reliable for real-time)
-                val payload = "$mode,$level,$intensity".toByteArray()
+                val payload = "$mode,$level,$intensity,$ts".toByteArray()
                 for (node in nodes) {
                     retryWithDelay(2, 300) {
                         messageClient.sendMessage(node.id, AppConstants.PATH_CONTROL, payload).await()
