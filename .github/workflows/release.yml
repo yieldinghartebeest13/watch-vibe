@@ -138,6 +138,8 @@ jobs:
         env:
           TAG_NAME: ${{ inputs.type }}${{ inputs.version }}
         run: |
+          git config user.email "ci@watchvibe.bot"
+          git config user.name "WatchVibe CI"
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
             echo "::warning::Tag $TAG_NAME already exists — skipping tag creation"
           else
