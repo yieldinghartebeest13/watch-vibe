@@ -65,16 +65,34 @@ class WearDataLayer(context: Context) {
 
     suspend fun sendPing() {
         withContext(Dispatchers.IO) {
+            val count = ++pingCounter
+            val ts = System.currentTimeMillis()
+
+            // Send via DataItem (persistent, survives brief disconnects)
             try {
-                val count = ++pingCounter
                 val request = PutDataMapRequest.create(AppConstants.PATH_PING).apply {
-                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putLong("timestamp", ts)
                     dataMap.putLong("counter", count)
                 }
                 request.setUrgent()
                 dataClient.putDataItem(request.asPutDataRequest()).await()
             } catch (e: Exception) {
-                Log.d(TAG, "Ping failed: ${e.message}")
+                Log.d(TAG, "Ping DataItem failed: ${e.message}")
+            }
+
+            // Also send via Message (lower latency, real-time channel)
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                val payload = "$count,$ts".toByteArray()
+                for (node in nodes) {
+                    try {
+                        messageClient.sendMessage(node.id, AppConstants.PATH_PING, payload).await()
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Ping message to ${node.displayName} failed: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Ping message failed: ${e.message}")
             }
         }
     }

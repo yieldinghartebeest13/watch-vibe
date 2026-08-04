@@ -57,6 +57,8 @@ class VibrationForegroundService : Service() {
     private var lastIntensity: Int = 100
     @Volatile private var lastPingTime: Long = 0
     @Volatile private var lastPingCounter: Long = -1
+    @Volatile private var pingEverReceived: Boolean = false
+    private var heartbeatLost: Boolean = false
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
 
@@ -170,6 +172,7 @@ class VibrationForegroundService : Service() {
                         if (counter > lastPingCounter) {
                             lastPingCounter = counter
                             lastPingTime = System.currentTimeMillis()
+                            pingEverReceived = true
                         }
                     }
                 }
@@ -228,6 +231,16 @@ class VibrationForegroundService : Service() {
                     Log.d(TAG, "Launch message from phone")
                     startMainActivity()
                 }
+                AppConstants.PATH_PING -> {
+                    val body = String(event.data)
+                    val parts = body.split(",")
+                    val counter = parts.getOrNull(0)?.toLongOrNull() ?: -1
+                    if (counter > lastPingCounter) {
+                        lastPingCounter = counter
+                        lastPingTime = System.currentTimeMillis()
+                        pingEverReceived = true
+                    }
+                }
                 else -> {
                     Log.d(TAG, "Unknown message path: ${event.path}")
                 }
@@ -276,24 +289,40 @@ class VibrationForegroundService : Service() {
             while (isActive) {
                 delay(1000)
                 val elapsed = System.currentTimeMillis() - lastPingTime
-                val connected = phoneConnected
-                if (elapsed > AppConstants.HEARTBEAT_TIMEOUT_MS && connected) {
-                    phoneConnected = false
-                    Log.d(TAG, "Heartbeat timeout! (${elapsed}ms) → stopping vibration")
+
+                // ── Disconnect detection ──
+                // If pings ever flowed and now stopped for > TIMEOUT,
+                // the phone is gone. Cancel unconditionally — do NOT
+                // depend on phoneConnected (capability listener may have
+                // already set it false, or may never have fired).
+                if (elapsed > AppConstants.HEARTBEAT_TIMEOUT_MS && pingEverReceived) {
+                    heartbeatLost = true
+                    if (phoneConnected) {
+                        phoneConnected = false
+                    }
+                    Log.w(TAG, "Heartbeat LOST — no ping for ${elapsed}ms → forcing cancel")
                     vibratorEngine.cancel()
                     broadcastStatus()
-                } else if (elapsed <= AppConstants.HEARTBEAT_TIMEOUT_MS && !connected) {
-                    // Phone is sending pings again → reconnected
+                    // Spin until pings resume
+                    while (isActive && (System.currentTimeMillis() - lastPingTime) > AppConstants.HEARTBEAT_TIMEOUT_MS) {
+                        delay(1000)
+                    }
+                    // Pings resumed — fall through to reconnect
+                }
+
+                // ── Reconnect detection ──
+                // Fire when pings resume after a heartbeat-declared loss.
+                // Uses heartbeatLost (not phoneConnected) so the capability
+                // listener setting phoneConnected=true early doesn't block us.
+                if (elapsed <= AppConstants.HEARTBEAT_TIMEOUT_MS && heartbeatLost) {
+                    heartbeatLost = false
                     phoneConnected = true
-                    Log.d(TAG, "Phone reconnected — resuming vibration mode=$lastMode")
+                    Log.d(TAG, "Heartbeat RESTORED — resuming vibration mode=$lastMode")
                     if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
                         vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
                     }
                     broadcastStatus()
                 }
-                // Note: if elapsed > TIMEOUT but phoneConnected was already set
-                // to false by the capability listener, that's fine — the listener
-                // already handled the disconnect. We skip the no-op case.
             }
         }
     }
