@@ -55,10 +55,10 @@ class VibrationForegroundService : Service() {
     private var lastMode: Int = AppConstants.MODE_PAUSE
     private var lastLevel: Int = 0
     private var lastIntensity: Int = 100
-    @Volatile private var lastPingTime: Long = 0
+    // Lease model: vibration expires automatically unless pings extend it.
+    // Fails-safe — if the heartbeat mechanism breaks, vibration stops.
+    @Volatile private var vibrationLeaseExpiry: Long = 0
     @Volatile private var lastPingCounter: Long = -1
-    @Volatile private var pingEverReceived: Boolean = false
-    private var heartbeatLost: Boolean = false
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
 
@@ -149,6 +149,7 @@ class VibrationForegroundService : Service() {
                         Log.d(TAG, "DataItem: mode=$mode level=$level intensity=$intensity")
                         lastMode = mode; lastLevel = level; lastIntensity = intensity
                         vibratorEngine.setModeVibration(mode, level, intensity)
+                        renewLeaseIfActive(mode)
                         broadcastStatus()
 
                         // Delete STOP/PAUSE data items to prevent stale re-delivery.
@@ -171,8 +172,7 @@ class VibrationForegroundService : Service() {
                         val counter = map.getLong("counter", -1)
                         if (counter > lastPingCounter) {
                             lastPingCounter = counter
-                            lastPingTime = System.currentTimeMillis()
-                            pingEverReceived = true
+                            extendLease()
                         }
                     }
                 }
@@ -225,6 +225,7 @@ class VibrationForegroundService : Service() {
                     Log.d(TAG, "Message: mode=$mode level=$level intensity=$intensity")
                     lastMode = mode; lastLevel = level; lastIntensity = intensity
                     vibratorEngine.setModeVibration(mode, level, intensity)
+                    renewLeaseIfActive(mode)
                     broadcastStatus()
                 }
                 AppConstants.PATH_LAUNCH -> {
@@ -237,8 +238,7 @@ class VibrationForegroundService : Service() {
                     val counter = parts.getOrNull(0)?.toLongOrNull() ?: -1
                     if (counter > lastPingCounter) {
                         lastPingCounter = counter
-                        lastPingTime = System.currentTimeMillis()
-                        pingEverReceived = true
+                        extendLease()
                     }
                 }
                 else -> {
@@ -260,11 +260,16 @@ class VibrationForegroundService : Service() {
             Log.d(TAG, "Capability changed: ${nodes.size} nodes (was=$wasConnected now=$phoneConnected)")
 
             if (phoneConnected) {
-                lastPingTime = System.currentTimeMillis()
+                // Phone just appeared — give the lease a fresh start
+                // so pings have time to arrive before expiry.
+                extendLease()
             }
 
             if (wasConnected && !phoneConnected) {
+                // Fast-path: phone gone → kill vibration immediately.
+                // The lease expiry is the safety net if this doesn't fire.
                 Log.d(TAG, "Phone disconnected → stopping vibration")
+                vibrationLeaseExpiry = 0
                 vibratorEngine.cancel()
                 broadcastStatus()
             }
@@ -282,48 +287,39 @@ class VibrationForegroundService : Service() {
     }
 
     private fun startHeartbeatMonitor() {
-        lastPingTime = System.currentTimeMillis()
         heartbeatChecker = serviceScope.launch {
             delay(2000) // give initial connection time
-            Log.d(TAG, "Heartbeat monitor started (timeout=${AppConstants.HEARTBEAT_TIMEOUT_MS}ms)")
+            Log.d(TAG, "Lease monitor started (lease=${AppConstants.VIBRATION_LEASE_MS}ms)")
             while (isActive) {
                 delay(1000)
-                val elapsed = System.currentTimeMillis() - lastPingTime
-
-                // ── Disconnect detection ──
-                // If pings ever flowed and now stopped for > TIMEOUT,
-                // the phone is gone. Cancel unconditionally — do NOT
-                // depend on phoneConnected (capability listener may have
-                // already set it false, or may never have fired).
-                if (elapsed > AppConstants.HEARTBEAT_TIMEOUT_MS && pingEverReceived) {
-                    heartbeatLost = true
+                val now = System.currentTimeMillis()
+                // Dead man's switch: if the lease expired while vibrating,
+                // the phone is gone — cancel immediately. No explicit
+                // disconnect signal needed. This is fails-safe by design.
+                if (vibratorEngine.vibrating && vibrationLeaseExpiry > 0 && now > vibrationLeaseExpiry) {
+                    Log.w(TAG, "Vibration LEASE EXPIRED — no ping for ${now - (vibrationLeaseExpiry - AppConstants.VIBRATION_LEASE_MS)}ms → cancelling")
+                    vibrationLeaseExpiry = 0
+                    vibratorEngine.cancel()
                     if (phoneConnected) {
                         phoneConnected = false
-                    }
-                    Log.w(TAG, "Heartbeat LOST — no ping for ${elapsed}ms → forcing cancel")
-                    vibratorEngine.cancel()
-                    broadcastStatus()
-                    // Spin until pings resume
-                    while (isActive && (System.currentTimeMillis() - lastPingTime) > AppConstants.HEARTBEAT_TIMEOUT_MS) {
-                        delay(1000)
-                    }
-                    // Pings resumed — fall through to reconnect
-                }
-
-                // ── Reconnect detection ──
-                // Fire when pings resume after a heartbeat-declared loss.
-                // Uses heartbeatLost (not phoneConnected) so the capability
-                // listener setting phoneConnected=true early doesn't block us.
-                if (elapsed <= AppConstants.HEARTBEAT_TIMEOUT_MS && heartbeatLost) {
-                    heartbeatLost = false
-                    phoneConnected = true
-                    Log.d(TAG, "Heartbeat RESTORED — resuming vibration mode=$lastMode")
-                    if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
-                        vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
                     }
                     broadcastStatus()
                 }
             }
+        }
+    }
+
+    /** Extend the vibration lease — called on every heartbeat ping. */
+    private fun extendLease() {
+        vibrationLeaseExpiry = System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
+    }
+
+    /** Renew the lease if the command starts vibration; zero it if it stops. */
+    private fun renewLeaseIfActive(mode: Int) {
+        vibrationLeaseExpiry = if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
+            0L
+        } else {
+            System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
         }
     }
 

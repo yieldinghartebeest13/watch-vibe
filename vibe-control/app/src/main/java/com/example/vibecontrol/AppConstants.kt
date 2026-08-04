@@ -38,6 +38,12 @@ object AppConstants {
     const val HEARTBEAT_INTERVAL_MS = 1_000L
     const val HEARTBEAT_TIMEOUT_MS = 2_000L
 
+    // ── Safety lease ───────────────────────────────────────
+    // Vibration runs on a renewable lease: each ping extends
+    // the lease by this amount. If pings stop, vibration
+    // cancels itself automatically — no explicit cancel needed.
+    const val VIBRATION_LEASE_MS = 3_000L
+
     // ── Labels ─────────────────────────────────────────────
     val SPEED_LABELS = arrayOf("Slow", "Medium", "Fast", "Very Fast")
 
