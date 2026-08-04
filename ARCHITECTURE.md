@@ -4,7 +4,7 @@ Two companion apps that control a watch's vibration motor from your phone.
 
 ---
 
-## Architecture (v3 — Amplitude API + Waveform Animation)
+## Architecture (v3 — Amplitude API + Renewable Lease)
 
 ```
 ┌──────────────────────────────────────────┐     ┌────────────────────────────────────┐
@@ -13,16 +13,16 @@ Two companion apps that control a watch's vibration motor from your phone.
 │  │ MainActivity                       │  │     │  │ VibrationForegroundService   │  │
 │  │  6 tiles (3×2 grid)                │  │     │  │  ★ VibratorEngine (amplitude) │  │
 │  │  WaveformView per tile             │  │     │  │  ★ Data/Message/Cap listeners │  │
-│  │  Speed +/- (60dp)                  │  │     │  │  ★ Heartbeat monitor (1s/2s)  │  │
-│  │  STOP (red when active)            │  │     │  │  ★ Ping counter (anti-stale)   │  │
-│  │  Active tile: rotating dots        │  │     │  │  ★ Auto-resume on reconnect    │  │
-│  │  + waveform-tracing pulse          │  │     │  │  ★ WAKE_LOCK + notification    │  │
+│  │  Speed +/- (60dp)                  │  │     │  │  ★ Lease monitor (3s renew)   │  │
+│  │  STOP (red when active)            │  │     │  │  ★ Dead-man's switch          │  │
+│  │  Active tile: rotating dots        │  │     │  │  ★ WAKE_LOCK + notification    │  │
+│  │  + waveform-tracing pulse          │  │     │  │  ★ Status from lease (unified) │  │
 │  └──────────┬─────────────────────────┘  │     │  └──────────────┬───────────────┘  │
 │             │                            │     │                 │ broadcasts       │
 │  ┌──────────▼─────────────────────────┐  │     │  ┌──────────────▼───────────────┐  │
 │  │ MainViewModel                      │  │     │  │ MainActivity (KIOSK MODE)    │  │
 │  │  mode, level                       │  │     │  │  Mode name as primary status  │  │
-│  │  Heartbeat (1s)                    │  │     │  │  Speed label below            │  │
+│  │  Heartbeat (1s, dual-transport)    │  │     │  │  Speed label below            │  │
 │  │  CapabilityClient.addListener      │  │     │  │  All touch/back blocked       │  │
 │  └──────────┬─────────────────────────┘  │     │  │  Crown long-press to exit     │  │
 │             │                            │     │  └──────────────────────────────┘  │
@@ -65,11 +65,25 @@ Every command is processed immediately. `VibratorEngine.setModeVibration()` dedu
 if (mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
 ```
 
-### 4. Heartbeat + ping counter for disconnect detection
+### 4. Renewable vibration lease (dead-man's switch)
 
-Phone pings `/ping` every 1s with incrementing counter. Watch timeout 2s.
-On disconnect → cancel vibration + "Waiting..." status.
-On reconnect → auto-restore last mode/level.
+Phone pings `/ping` every 1s via both DataClient and MessageClient (dual-transport
+redundancy). Each ping extends the watch's vibration lease by `VIBRATION_LEASE_MS`
+(3s). A control command also sets a fresh lease on start, or zeros it on stop.
+
+If the lease expires (no ping for 3s), vibration cancels itself automatically —
+no explicit disconnect signal needed. This is **fails-safe by design**: if the
+heartbeat mechanism breaks entirely, vibration stops within 3 seconds. It is
+structurally impossible for the watch to vibrate indefinitely without the phone.
+
+**Two-layer disconnect detection:**
+1. **CapabilityClient listener** → fast-path: zeroes lease and cancels vibration
+   immediately when the phone node disappears. Sub-second reaction.
+2. **Lease expiry** → safety net: if the capability listener doesn't fire (silent
+   disconnect, transport glitch), the lease expires in 3s and vibration stops.
+
+The UI connection status reads the same lease value — the display and the actual
+function can never diverge.
 
 ### 5. Auto-start on watch
 
@@ -158,9 +172,10 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 
 | Layer | Watch | Phone |
 |-------|-------|-------|
-| CapabilityClient listener | Detects phone presence | Detects watch capability |
-| Heartbeat ping | Phone → watch every 1s with counter | Phone sends |
-| Heartbeat timeout | 2s → disconnect + cancel | N/A |
+| CapabilityClient listener | Detects phone presence → immediate cancel | Detects watch capability |
+| Heartbeat ping (dual) | Phone → watch every 1s via DataClient + MessageClient | Phone sends |
+| Lease expiry (safety net) | 3s after last ping → vibration cancels itself | N/A |
+| UI connection status | Derived from lease (`vibrationLeaseExpiry > now`) | — |
 | Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
 | Boot | BootReceiver starts FGS | — |
 
@@ -194,7 +209,7 @@ app/src/main/
 ├── java/com/example/vibecontrol/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
-│   ├── VibrationForegroundService.kt # Listeners + heartbeat + auto-resume
+│   ├── VibrationForegroundService.kt # Listeners + lease monitor + dead-man's switch
 │   ├── VibrationDataLayerService.kt  # Wake-up only (static flag check)
 │   ├── BootReceiver.kt               # Auto-start on reboot
 │   └── MainActivity.kt               # Kiosk mode display
