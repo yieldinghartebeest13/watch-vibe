@@ -308,7 +308,18 @@ class VibrationForegroundService : Service() {
 
     /** Extend the vibration lease — called on every heartbeat ping. */
     private fun extendLease() {
+        val wasExpired = vibrationLeaseExpiry <= System.currentTimeMillis()
         vibrationLeaseExpiry = System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
+        if (wasExpired) {
+            // Lease just revived — auto-resume vibration if we were active
+            // before the disconnect, and update the UI.
+            Log.d(TAG, "Lease revived — was expired, now current")
+            if (lastMode != AppConstants.MODE_STOP && lastMode != AppConstants.MODE_PAUSE) {
+                Log.d(TAG, "Auto-resuming vibration mode=$lastMode")
+                vibratorEngine.setModeVibration(lastMode, lastLevel, lastIntensity)
+            }
+            broadcastStatus()
+        }
     }
 
     /** Renew the lease if the command starts vibration; zero it if it stops. */
