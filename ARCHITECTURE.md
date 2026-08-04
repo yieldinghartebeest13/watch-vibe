@@ -35,7 +35,8 @@ Two companion apps that control a watch's vibration motor from your phone.
                   │                              │  │ BootReceiver                 │  │
          Bluetooth/WiFi                           │  │  Auto-start on reboot        │  │
          Wear OS Data Layer                       │  └──────────────────────────────┘  │
-         paths: /control, /ping                   └────────────────────────────────────┘
+         paths: /control, /ping,                    └────────────────────────────────────┘
+                /launch, /minimize
          keys: wear_mode, wear_level,
                 wear_intensity
 ```
@@ -165,6 +166,26 @@ Three layers:
 - **VibrationDataLayerService**: Play Services wakes app on any incoming data → starts FGS
 - **Phone sends `/launch`** on open → triggers wake-up
 
+### 10. Auto-minimize on background
+
+When the phone app goes to the background and no vibration is active, it sends a
+`/minimize` message to the watch, which then returns to the watch face. This way
+the user doesn't have to manually long-press the crown to dismiss the watch UI.
+
+**Two trigger paths:**
+
+| Trigger | Delay | Cancel condition |
+|---------|-------|------------------|
+| Phone `onBackground()` + mode is STOP/PAUSE | Immediate | — |
+| Connection lease expiry + not vibrating | 30 seconds | Ping arrives or vibration command received |
+
+The 30s grace period on lease expiry prevents brief Bluetooth dropouts from
+needlessly closing the watch UI, while the immediate minimize on explicit
+backgrounding lets the user dismiss the watch instantly by switching apps.
+
+When vibration is active, the watch NEVER minimizes — the user explicitly
+started vibration and may want to monitor status on their wrist.
+
 ---
 
 ## Vibration Modes (6 total)
@@ -256,6 +277,7 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 | Background heartbeat | Mode-aware: runs in background only when vibration active | onBackground() checks mode |
 | Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
 | Boot | BootReceiver starts FGS | — |
+| Auto-minimize | Lease-expiry (30s delay) + phone-background (immediate) when idle | Phone sends /minimize on background |
 
 ---
 
@@ -266,7 +288,7 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 ```
 app/src/main/
 ├── AndroidManifest.xml
-├── java/com/example/vibecontrol/
+├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt       # Shared constants (identical in both projects)
 │   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient
 │   ├── MainViewModel.kt      # State + mode-aware heartbeat + SavedStateHandle
@@ -284,7 +306,7 @@ app/src/main/
 ```
 app/src/main/
 ├── AndroidManifest.xml       # VIBRATE + WAKE_LOCK + FOREGROUND_*
-├── java/com/example/vibecontrol/
+├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
 │   ├── VibrationForegroundService.kt # Listeners + lease monitor + dead-man's switch

@@ -83,6 +83,9 @@ class MainViewModel(
         if (_mode.value == AppConstants.MODE_STOP || _mode.value == AppConstants.MODE_PAUSE) {
             stopHeartbeat()
             stopConnectionMonitor()
+            // Not vibrating — tell the watch to minimize so the user
+            // doesn't have to manually dismiss it.
+            viewModelScope.launch { wearDataLayer.sendMinimize() }
         }
     }
 

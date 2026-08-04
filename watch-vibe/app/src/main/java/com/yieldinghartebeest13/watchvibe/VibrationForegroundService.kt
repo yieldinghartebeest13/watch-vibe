@@ -36,6 +36,7 @@ class VibrationForegroundService : Service() {
         // Actions for binding from Activity
         const val ACTION_STOP_VIBRATION = "com.yieldinghartebeest13.watchvibe.STOP"
         const val ACTION_QUERY_STATUS = "com.yieldinghartebeest13.watchvibe.QUERY_STATUS"
+        const val ACTION_MINIMIZE = "com.yieldinghartebeest13.watchvibe.MINIMIZE"
         const val EXTRA_MODE = "mode"
         const val EXTRA_LEVEL = "level"
         const val EXTRA_INTENSITY = "intensity"
@@ -68,6 +69,7 @@ class VibrationForegroundService : Service() {
     @Volatile private var lastCommandTimestamp: Long = 0
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
+    private var minimizeJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -187,6 +189,10 @@ class VibrationForegroundService : Service() {
                         Log.d(TAG, "Launch request from phone")
                         startMainActivity()
                     }
+                    AppConstants.PATH_MINIMIZE -> {
+                        Log.d(TAG, "Minimize request from phone")
+                        sendBroadcast(Intent(ACTION_MINIMIZE).apply { setPackage(packageName) })
+                    }
                     AppConstants.PATH_PING -> {
                         val map = DataMapItem.fromDataItem(item).dataMap
                         val counter = map.getLong("counter", -1)
@@ -272,6 +278,10 @@ class VibrationForegroundService : Service() {
                     Log.d(TAG, "Launch message from phone")
                     startMainActivity()
                 }
+                AppConstants.PATH_MINIMIZE -> {
+                    Log.d(TAG, "Minimize message from phone")
+                    sendBroadcast(Intent(ACTION_MINIMIZE).apply { setPackage(packageName) })
+                }
                 AppConstants.PATH_PING -> {
                     val body = String(event.data)
                     val parts = body.split(",")
@@ -341,10 +351,17 @@ class VibrationForegroundService : Service() {
                     Log.w(TAG, "Connection LEASE EXPIRED → cancelling everything")
                     connectionLeaseExpiry = 0
                     vibrationLeaseExpiry = 0
-                    if (vibratorEngine.vibrating) {
+                    val wasVibrating = vibratorEngine.vibrating
+                    if (wasVibrating) {
                         vibratorEngine.cancel()
                     }
                     broadcastStatus()
+                    // If not actively vibrating when phone disconnects,
+                    // schedule a delayed minimize — cancel it if connection
+                    // restores or vibration starts within the grace period.
+                    if (!wasVibrating) {
+                        scheduleMinimize()
+                    }
                 }
             }
         }
@@ -352,6 +369,7 @@ class VibrationForegroundService : Service() {
 
     /** Extend both leases — called on every heartbeat ping. */
     private fun extendLease() {
+        cancelMinimize()
         val wasExpired = vibrationLeaseExpiry <= System.currentTimeMillis()
         val now = System.currentTimeMillis()
         connectionLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
@@ -411,8 +429,25 @@ class VibrationForegroundService : Service() {
         vibrationLeaseExpiry = if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
             0L
         } else {
+            cancelMinimize()  // vibration started — don't minimize anymore
             System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
         }
+    }
+
+    // ── Delayed minimize ──────────────────────────────────
+
+    private fun scheduleMinimize() {
+        minimizeJob?.cancel()
+        minimizeJob = serviceScope.launch {
+            delay(30_000L)  // 30s grace period before minimizing
+            Log.d(TAG, "Minimize grace period expired — returning to watch face")
+            sendBroadcast(Intent(ACTION_MINIMIZE).apply { setPackage(packageName) })
+        }
+    }
+
+    private fun cancelMinimize() {
+        minimizeJob?.cancel()
+        minimizeJob = null
     }
 
     // ── Helpers ────────────────────────────────────────────

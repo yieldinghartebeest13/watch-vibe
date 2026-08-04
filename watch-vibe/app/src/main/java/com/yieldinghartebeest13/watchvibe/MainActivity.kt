@@ -53,13 +53,14 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(VibrationForegroundService.BROADCAST_STATUS)
+            addAction(VibrationForegroundService.ACTION_MINIMIZE)
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(statusReceiver,
-                IntentFilter(VibrationForegroundService.BROADCAST_STATUS),
-                Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(statusReceiver,
-                IntentFilter(VibrationForegroundService.BROADCAST_STATUS))
+            registerReceiver(statusReceiver, filter)
         }
         // Request current status immediately so display is never stale
         val query = Intent(this, VibrationForegroundService::class.java).apply {
@@ -171,12 +172,19 @@ class MainActivity : Activity() {
 
     inner class StatusReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != VibrationForegroundService.BROADCAST_STATUS) return
-            val mode = intent.getIntExtra(VibrationForegroundService.EXTRA_MODE, AppConstants.MODE_PAUSE)
-            val level = intent.getIntExtra(VibrationForegroundService.EXTRA_LEVEL, 0)
-            val active = intent.getBooleanExtra(VibrationForegroundService.EXTRA_ACTIVE, false)
-            val phoneConnected = intent.getBooleanExtra(VibrationForegroundService.EXTRA_PHONE_CONNECTED, false)
-            updateDisplay(mode, level, active, phoneConnected)
+            when (intent?.action) {
+                VibrationForegroundService.BROADCAST_STATUS -> {
+                    val mode = intent.getIntExtra(VibrationForegroundService.EXTRA_MODE, AppConstants.MODE_PAUSE)
+                    val level = intent.getIntExtra(VibrationForegroundService.EXTRA_LEVEL, 0)
+                    val active = intent.getBooleanExtra(VibrationForegroundService.EXTRA_ACTIVE, false)
+                    val phoneConnected = intent.getBooleanExtra(VibrationForegroundService.EXTRA_PHONE_CONNECTED, false)
+                    updateDisplay(mode, level, active, phoneConnected)
+                }
+                VibrationForegroundService.ACTION_MINIMIZE -> {
+                    Log.d(TAG, "Minimize — returning to watch face")
+                    moveTaskToBack(true)
+                }
+            }
         }
     }
 }

@@ -25,6 +25,7 @@ object AppConstants {
     const val PATH_CONTROL = "/control"
     const val PATH_PING = "/ping"
     const val PATH_LAUNCH = "/launch"
+    const val PATH_MINIMIZE = "/minimize"
 
     // ── Wear Data Layer keys ───────────────────────────────
     const val KEY_MODE = "wear_mode"

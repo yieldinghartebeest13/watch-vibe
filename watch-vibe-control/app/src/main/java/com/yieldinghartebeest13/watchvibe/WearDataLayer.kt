@@ -122,6 +122,24 @@ class WearDataLayer(context: Context) {
         }
     }
 
+    suspend fun sendMinimize() {
+        withContext(Dispatchers.IO) {
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                for (node in nodes) {
+                    try {
+                        messageClient.sendMessage(node.id, AppConstants.PATH_MINIMIZE, ByteArray(0)).await()
+                        Log.d(TAG, "Minimize sent to ${node.displayName}")
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Minimize to ${node.displayName} failed", e)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Minimize failed", e)
+            }
+        }
+    }
+
     suspend fun isWearConnected(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
