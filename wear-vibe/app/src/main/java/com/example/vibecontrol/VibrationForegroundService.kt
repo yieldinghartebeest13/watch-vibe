@@ -297,12 +297,9 @@ class VibrationForegroundService : Service() {
                 // the phone is gone — cancel immediately. No explicit
                 // disconnect signal needed. This is fails-safe by design.
                 if (vibratorEngine.vibrating && vibrationLeaseExpiry > 0 && now > vibrationLeaseExpiry) {
-                    Log.w(TAG, "Vibration LEASE EXPIRED — no ping for ${now - (vibrationLeaseExpiry - AppConstants.VIBRATION_LEASE_MS)}ms → cancelling")
+                    Log.w(TAG, "Vibration LEASE EXPIRED — lease ran out → cancelling")
                     vibrationLeaseExpiry = 0
                     vibratorEngine.cancel()
-                    if (phoneConnected) {
-                        phoneConnected = false
-                    }
                     broadcastStatus()
                 }
             }
@@ -344,14 +341,19 @@ class VibrationForegroundService : Service() {
         }
     }
 
+    /** Whether the heartbeat lease is current (pings are flowing). */
+    private fun isLeaseCurrent(): Boolean =
+        vibrationLeaseExpiry > System.currentTimeMillis()
+
     private fun broadcastStatus() {
+        val connected = isLeaseCurrent()
         val intent = Intent(BROADCAST_STATUS).apply {
             setPackage(packageName)
             putExtra(EXTRA_MODE, vibratorEngine.mode)
             putExtra(EXTRA_LEVEL, vibratorEngine.level)
             putExtra(EXTRA_INTENSITY, vibratorEngine.intensity)
             putExtra(EXTRA_ACTIVE, vibratorEngine.vibrating)
-            putExtra(EXTRA_PHONE_CONNECTED, phoneConnected)
+            putExtra(EXTRA_PHONE_CONNECTED, connected)
         }
         sendBroadcast(intent)
     }
@@ -405,7 +407,7 @@ class VibrationForegroundService : Service() {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("Vibration Control")
-                .setContentText(if (phoneConnected) "Connected to phone" else "Waiting for phone")
+                .setContentText(if (isLeaseCurrent()) "Connected to phone" else "Waiting for phone")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
@@ -415,7 +417,7 @@ class VibrationForegroundService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
                 .setContentTitle("Vibration Control")
-                .setContentText(if (phoneConnected) "Connected to phone" else "Waiting for phone")
+                .setContentText(if (isLeaseCurrent()) "Connected to phone" else "Waiting for phone")
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
