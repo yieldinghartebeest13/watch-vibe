@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="20dp"
+    android:background="#1a1a2e">
+
+    <!-- App title (no action bar) -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="WatchVibe"
+        android:textColor="#e0e0e0"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:gravity="start"
+        android:letterSpacing="0.12"
+        android:layout_marginBottom="16dp" />
+
+    <!-- Wear status -->
+    <TextView
+        android:id="@+id/wearStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Checking..."
+        android:textColor="#a0a0b0"
+        android:textSize="14sp"
+        android:layout_marginBottom="4dp" />
+
+    <!-- Status -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Ready"
+        android:textColor="#e0e0e0"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp" />
+
+    <!-- Mode tiles 2x2 grid -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <!-- Constant tile -->
+            <FrameLayout
+                android:id="@+id/tileConstant"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileConstantBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileConstantTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Constant"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileConstantActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileConstantDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileConstantPulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileConstantCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+        <com.yieldinghartebeest13.watchvibe.WaveformView
+            android:id="@+id/tileConstantChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
+            </FrameLayout>
+
+            <!-- Intermittent tile -->
+            <FrameLayout
+                android:id="@+id/tileIntermittent"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileIntermittentBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileIntermittentTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Intermittent"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileIntermittentActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileIntermittentDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileIntermittentPulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileIntermittentCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+        <com.yieldinghartebeest13.watchvibe.WaveformView
+            android:id="@+id/tileIntermittentChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <!-- Ramp tile -->
+            <FrameLayout
+                android:id="@+id/tileRamp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileRampBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileRampTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Ramp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileRampActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileRampDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileRampPulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileRampCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+        <com.yieldinghartebeest13.watchvibe.WaveformView
+            android:id="@+id/tileRampChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
+            </FrameLayout>
+
+            <!-- Burst tile -->
+            <FrameLayout
+                android:id="@+id/tileBurst"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileBurstBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileBurstTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Burst"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileBurstActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileBurstDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileBurstPulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileBurstCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+        <com.yieldinghartebeest13.watchvibe.WaveformView
+            android:id="@+id/tileBurstChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            android:layout_marginBottom="0dp">
+
+            <!-- Wave tile -->
+            <FrameLayout
+                android:id="@+id/tileWave"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileWaveBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileWaveTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Wave"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileWaveActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileWaveDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileWavePulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileWaveCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+        <com.yieldinghartebeest13.watchvibe.WaveformView
+            android:id="@+id/tileWaveChart"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom" />
+            </FrameLayout>
+
+            <!-- Random tile -->
+            <FrameLayout
+                android:id="@+id/tileRandom"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:background="@drawable/tile_bg_active"
+                android:clipChildren="false"
+                android:clipToPadding="false">
+
+                <View
+                    android:id="@+id/tileRandomBg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/tile_bg" />
+
+                <TextView
+                    android:id="@+id/tileRandomTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="Random"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textAllCaps="false" />
+
+                <FrameLayout
+                    android:id="@+id/tileRandomActive"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/tileRandomDots"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_dots_circle"
+                        android:tint="#FFFFFF" />
+
+                    <View
+                        android:id="@+id/tileRandomPulseBackdrop"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn"
+                        android:alpha="0.3" />
+
+                    <View
+                        android:id="@+id/tileRandomCenter"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/tile_bg_pause_btn" />
+                </FrameLayout>
+
+            </FrameLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Speed -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:layout_marginTop="12dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLess"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:text="-"
+            android:textSize="24sp"
+            app:cornerRadius="30dp"
+            android:backgroundTint="#4a7a7a" />
+
+        <TextView
+            android:id="@+id/speedLabel"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Speed: Slow"
+            android:textColor="#a0a0b0"
+            android:textSize="14sp"
+            android:gravity="center" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnMore"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:text="+"
+            android:textSize="24sp"
+            app:cornerRadius="30dp"
+            android:backgroundTint="#4a7a7a" />
+    </LinearLayout>
+
+    <!-- Stop button -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnStop"
+        android:layout_width="200dp"
+        android:layout_height="52dp"
+        android:text="STOP"
+        android:textAllCaps="true"
+        android:enabled="false"
+        app:cornerRadius="26dp"
+        android:backgroundTint="#2d3436" />
+
+</LinearLayout>

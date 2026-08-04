@@ -3,10 +3,23 @@ export ANDROID_HOME JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(ANDROID_HOME)/platform-tools:$(PATH)
 
 GRADLE    := ./gradlew --no-daemon
-WEAR_DIR  := wear-vibe
-PHONE_DIR := vibe-control
+WEAR_DIR  := watch-vibe
+PHONE_DIR := watch-vibe-control
 WEAR_APK  := $(WEAR_DIR)/app/build/outputs/apk/debug/app-debug.apk
 PHONE_APK := $(PHONE_DIR)/app/build/outputs/apk/debug/app-debug.apk
+
+# Release (production) APK paths
+WEAR_RELEASE_UNSIGNED  := $(WEAR_DIR)/app/build/outputs/apk/release/app-release-unsigned.apk
+PHONE_RELEASE_UNSIGNED := $(PHONE_DIR)/app/build/outputs/apk/release/app-release-unsigned.apk
+WEAR_RELEASE_APK       := $(WEAR_DIR)/app/build/outputs/apk/release/WatchVibe.apk
+PHONE_RELEASE_APK      := $(PHONE_DIR)/app/build/outputs/apk/release/WatchVibeControl.apk
+PHONE_RELEASE_TMP      := /data/local/tmp/WatchVibeControl.apk
+
+# Keystore — override in .env
+RELEASE_KEYSTORE           ?= release.keystore
+RELEASE_KEYSTORE_PASSWORD  ?=
+RELEASE_KEY_ALIAS          ?= release
+RELEASE_KEY_PASSWORD       ?=
 
 # ── Auto-detect devices ────────────────────────────────────
 # Uses ro.build.characteristics=watch to identify Wear OS.
@@ -28,8 +41,8 @@ PHONE_SERIAL_ENV := $(PHONE_SERIAL)
 
 ADB_W   := adb -s $(WEAR_SERIAL)
 ADB_P   := adb -s $(PHONE_SERIAL)
-WEAR_PKG  := com.example.vibecontrol
-PHONE_PKG := com.example.vibecontrol
+WEAR_PKG  := com.yieldinghartebeest13.watchvibe
+PHONE_PKG := com.yieldinghartebeest13.watchvibe
 WEAR_ACT  := $(WEAR_PKG)/.MainActivity
 PHONE_ACT := $(PHONE_PKG)/.MainActivity
 
@@ -46,13 +59,15 @@ _ok    = printf '  \033[32m✓\033[0m %s\n' '$(1)'
 _fail  = printf '  \033[31m✗\033[0m %s\n' '$(1)' >&2
 _info  = printf '  → %s\n' '$(1)'
 
-.PHONY: all build build-wear build-phone install install-wear install-phone
+.PHONY: all build build-wear build-phone build-release build-release-wear build-release-phone
+.PHONY: sign-release guard-keystore
+.PHONY: install install-wear install-phone install-release install-release-wear install-release-phone
 .PHONY: launch launch-wear launch-phone stop stop-wear stop-phone
 .PHONY: restart restart-wear restart-phone clear clear-wear clear-phone
 .PHONY: logs logs-wear logs-phone debug debug-wear debug-phone
 .PHONY: test test-wear test-phone test-e2e
 .PHONY: tap-constant tap-intermittent tap-stop clear-logs send-test
-.PHONY: clean info devices
+.PHONY: clean info devices release
 
 # ═══════════════════════════════════════════════
 # Device discovery
@@ -78,34 +93,145 @@ all: build
 build: build-wear build-phone
 
 build-wear:
-	@echo "🔨 Building wear-vibe..."
+	@echo "🔨 Building watch-vibe..."
 	@_log=$$(mktemp); \
 	cd $(WEAR_DIR) && $(GRADLE) assembleDebug --console=plain >$$_log 2>&1; _rc=$$?; \
 	if [ $$_rc -eq 0 ]; then \
 		tail -1 $$_log; \
-		$(call _ok,wear-vibe built); \
+		$(call _ok,watch-vibe built); \
 	else \
 		echo "--- build output ---"; \
 		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
 		echo "--- end ---"; \
-		$(call _fail,wear-vibe build failed); \
+		$(call _fail,watch-vibe build failed); \
 		rm -f $$_log; exit $$_rc; \
 	fi; rm -f $$_log
 
 build-phone:
-	@echo "🔨 Building vibe-control..."
+	@echo "🔨 Building watch-vibe-control..."
 	@_log=$$(mktemp); \
 	cd $(PHONE_DIR) && $(GRADLE) assembleDebug --console=plain >$$_log 2>&1; _rc=$$?; \
 	if [ $$_rc -eq 0 ]; then \
 		tail -1 $$_log; \
-		$(call _ok,vibe-control built); \
+		$(call _ok,watch-vibe-control built); \
 	else \
 		echo "--- build output ---"; \
 		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
 		echo "--- end ---"; \
-		$(call _fail,vibe-control build failed); \
+		$(call _fail,watch-vibe-control build failed); \
 		rm -f $$_log; exit $$_rc; \
 	fi; rm -f $$_log
+
+# ═══════════════════════════════════════════════
+# Release (production signed)
+# ═══════════════════════════════════════════════
+
+guard-keystore:
+	@if [ ! -f "$(RELEASE_KEYSTORE)" ]; then \
+		$(call _fail,Keystore not found: $(RELEASE_KEYSTORE)); \
+		echo "  Generate one: keytool -genkey -keystore $(RELEASE_KEYSTORE) ..."; \
+		exit 1; \
+	fi
+	@if [ -z "$(RELEASE_KEYSTORE_PASSWORD)" ]; then \
+		$(call _fail,RELEASE_KEYSTORE_PASSWORD not set); \
+		echo "  Add it to .env"; \
+		exit 1; \
+	fi
+	@if [ -z "$(RELEASE_KEY_PASSWORD)" ]; then \
+		$(call _fail,RELEASE_KEY_PASSWORD not set); \
+		echo "  Add it to .env"; \
+		exit 1; \
+	fi
+
+build-release: build-release-wear build-release-phone
+
+build-release-wear:
+	@echo "🔨 Building watch-vibe (release)..."
+	@_log=$$(mktemp); \
+	cd $(WEAR_DIR) && $(GRADLE) assembleRelease --console=plain >$$_log 2>&1; _rc=$$?; \
+	if [ $$_rc -eq 0 ]; then \
+		tail -1 $$_log; \
+		$(call _ok,watch-vibe release built); \
+	else \
+		echo "--- build output ---"; \
+		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
+		echo "--- end ---"; \
+		$(call _fail,watch-vibe release build failed); \
+		rm -f $$_log; exit $$_rc; \
+	fi; rm -f $$_log
+
+build-release-phone:
+	@echo "🔨 Building watch-vibe-control (release)..."
+	@_log=$$(mktemp); \
+	cd $(PHONE_DIR) && $(GRADLE) assembleRelease --console=plain >$$_log 2>&1; _rc=$$?; \
+	if [ $$_rc -eq 0 ]; then \
+		tail -1 $$_log; \
+		$(call _ok,watch-vibe-control release built); \
+	else \
+		echo "--- build output ---"; \
+		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
+		echo "--- end ---"; \
+		$(call _fail,watch-vibe-control release build failed); \
+		rm -f $$_log; exit $$_rc; \
+	fi; rm -f $$_log
+
+sign-release: guard-keystore build-release
+	@echo "✍️  Signing APKs..."
+	@$(ANDROID_HOME)/build-tools/34.0.0/apksigner sign \
+		--ks "$(RELEASE_KEYSTORE)" \
+		--ks-pass pass:"$(RELEASE_KEYSTORE_PASSWORD)" \
+		--ks-key-alias "$(RELEASE_KEY_ALIAS)" \
+		--key-pass pass:"$(RELEASE_KEY_PASSWORD)" \
+		"$(WEAR_RELEASE_UNSIGNED)" \
+		&& mv "$(WEAR_RELEASE_UNSIGNED)" "$(WEAR_RELEASE_APK)" \
+		&& $(call _ok,signed WatchVibe.apk) \
+		|| { $(call _fail,signing WatchVibe failed); exit 1; }
+	@$(ANDROID_HOME)/build-tools/34.0.0/apksigner sign \
+		--ks "$(RELEASE_KEYSTORE)" \
+		--ks-pass pass:"$(RELEASE_KEYSTORE_PASSWORD)" \
+		--ks-key-alias "$(RELEASE_KEY_ALIAS)" \
+		--key-pass pass:"$(RELEASE_KEY_PASSWORD)" \
+		"$(PHONE_RELEASE_UNSIGNED)" \
+		&& mv "$(PHONE_RELEASE_UNSIGNED)" "$(PHONE_RELEASE_APK)" \
+		&& $(call _ok,signed WatchVibeControl.apk) \
+		|| { $(call _fail,signing WatchVibeControl failed); exit 1; }
+
+install-release: install-release-wear install-release-phone
+
+install-release-wear: guard-wear sign-release
+	@echo "📥 Installing release on watch ($(WEAR_SERIAL))..."
+	@if $(ADB_W) install -r "$(WEAR_RELEASE_APK)" 2>&1 | grep -q 'Success'; then \
+		$(call _ok,release installed on watch); \
+	else \
+		sleep 2; \
+		if $(ADB_W) install -r "$(WEAR_RELEASE_APK)" 2>&1 | grep -q 'Success'; then \
+			$(call _ok,release installed on watch (retry)); \
+		else \
+			$(call _fail,release install on watch failed); exit 1; \
+		fi; \
+	fi
+
+install-release-phone: guard-phone sign-release
+	@echo "📥 Installing release on phone ($(PHONE_SERIAL))..."
+	@$(ADB_P) connect $(PHONE_SERIAL) 2>/dev/null; true
+	@if $(ADB_P) push "$(PHONE_RELEASE_APK)" $(PHONE_RELEASE_TMP) >/dev/null 2>&1; then \
+		$(call _ok,pushed release APK); \
+	else \
+		$(call _fail,push failed); exit 1; \
+	fi
+	@if $(ADB_P) shell pm install -r -d $(PHONE_RELEASE_TMP) 2>&1 | grep -q 'Success'; then \
+		$(call _ok,release installed on phone); \
+	else \
+		sleep 2; \
+		if $(ADB_P) shell pm install -r -d $(PHONE_RELEASE_TMP) 2>&1 | grep -q 'Success'; then \
+			$(call _ok,release installed on phone (retry)); \
+		else \
+			$(call _fail,release install on phone failed); exit 1; \
+		fi; \
+	fi
+
+release: install-release launch
+	@$(call _ok,release build + install + launch complete)
 
 # ═══════════════════════════════════════════════
 # Install

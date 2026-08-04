@@ -14,10 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - project: wear-vibe
-            apk-name: WearVibe
-          - project: vibe-control
-            apk-name: WearVibeControl
+          - project: watch-vibe
+            apk-name: WatchVibe
+          - project: watch-vibe-control
+            apk-name: WatchVibeControl
 
     steps:
       - name: Checkout

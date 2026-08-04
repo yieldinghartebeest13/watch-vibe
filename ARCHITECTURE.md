@@ -46,8 +46,8 @@ Two companion apps that control a watch's vibration motor from your phone.
 
 | App | applicationId |
 |-----|---------------|
-| Phone (WatchVibeControl) | `com.example.vibecontrol` |
-| Watch (WatchVibe) | `com.example.vibecontrol` |
+| Phone (WatchVibeControl) | `com.yieldinghartebeest13.watchvibe` |
+| Watch (WatchVibe) | `com.yieldinghartebeest13.watchvibe` |
 
 Play Services routes data layer items by package name. Different IDs = data silently dropped.
 
@@ -261,7 +261,7 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 
 ## Project Structure
 
-### vibe-control/ (WatchVibeControl — Phone)
+### watch-vibe-control/ (WatchVibeControl — Phone)
 
 ```
 app/src/main/
@@ -279,7 +279,7 @@ app/src/main/
     └── drawable/tile_bg_pause_btn.xml
 ```
 
-### wear-vibe/ (WatchVibe — Watch)
+### watch-vibe/ (WatchVibe — Watch)
 
 ```
 app/src/main/
