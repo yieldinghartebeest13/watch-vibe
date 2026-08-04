@@ -100,7 +100,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        viewModel = MainViewModel(application)
+        viewModel = androidx.lifecycle.ViewModelProvider(
+            this,
+            androidx.lifecycle.SavedStateViewModelFactory(application, this)
+        ).get(MainViewModel::class.java)
 
         statusText = findViewById(R.id.statusText)
         wearStatus = findViewById(R.id.wearStatus)

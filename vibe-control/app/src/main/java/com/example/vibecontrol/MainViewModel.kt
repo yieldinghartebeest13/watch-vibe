@@ -2,6 +2,7 @@ package com.example.vibecontrol
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.Wearable
@@ -14,14 +15,28 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle
+) : AndroidViewModel(application) {
+
+    companion object {
+        private const val KEY_MODE = "saved_mode"
+        private const val KEY_LEVEL = "saved_level"
+    }
 
     private val wearDataLayer = WearDataLayer(application)
 
-    private val _mode = MutableStateFlow(AppConstants.MODE_PAUSE)
+    // Restore mode/level from saved state (survives process death).
+    // isVibrating always starts false — the watch state is authoritative.
+    private val _mode = MutableStateFlow(
+        savedStateHandle.get<Int>(KEY_MODE) ?: AppConstants.MODE_PAUSE
+    )
     val mode: StateFlow<Int> = _mode.asStateFlow()
 
-    private val _level = MutableStateFlow(0)
+    private val _level = MutableStateFlow(
+        savedStateHandle.get<Int>(KEY_LEVEL) ?: 0
+    )
     val level: StateFlow<Int> = _level.asStateFlow()
 
     private val _intensity = MutableStateFlow(50)
@@ -35,6 +50,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _statusText = MutableStateFlow("Ready")
     val statusText: StateFlow<String> = _statusText.asStateFlow()
+
+    init {
+        // If the UI was showing an active mode before process death,
+        // re-send it so the watch state and UI state are consistent.
+        val restoredMode = _mode.value
+        if (restoredMode != AppConstants.MODE_STOP && restoredMode != AppConstants.MODE_PAUSE) {
+            applyVibration()
+        }
+    }
 
     private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
@@ -142,16 +166,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun moreCadence() {
         _level.value = (_level.value + 1).coerceIn(0, 3)
+        savedStateHandle[KEY_LEVEL] = _level.value
         applyVibration()
     }
 
     fun minusCadence() {
         _level.value = (_level.value - 1).coerceIn(0, 3)
+        savedStateHandle[KEY_LEVEL] = _level.value
         applyVibration()
     }
 
     private fun setMode(mode: Int) {
         _mode.value = mode
+        savedStateHandle[KEY_MODE] = mode
         applyVibration()
     }
 

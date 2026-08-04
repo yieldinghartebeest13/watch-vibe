@@ -79,15 +79,33 @@ build: build-wear build-phone
 
 build-wear:
 	@echo "🔨 Building wear-vibe..."
-	@cd $(WEAR_DIR) && $(GRADLE) assembleDebug --console=plain 2>&1 | tail -3; \
-	_exit=$${PIPESTATUS[0]}; \
-	if [ $$_exit -eq 0 ]; then $(call _ok,wear-vibe built); else $(call _fail,wear-vibe build failed); exit $$_exit; fi
+	@_log=$$(mktemp); \
+	cd $(WEAR_DIR) && $(GRADLE) assembleDebug --console=plain >$$_log 2>&1; _rc=$$?; \
+	if [ $$_rc -eq 0 ]; then \
+		tail -1 $$_log; \
+		$(call _ok,wear-vibe built); \
+	else \
+		echo "--- build output ---"; \
+		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
+		echo "--- end ---"; \
+		$(call _fail,wear-vibe build failed); \
+		rm -f $$_log; exit $$_rc; \
+	fi; rm -f $$_log
 
 build-phone:
 	@echo "🔨 Building vibe-control..."
-	@cd $(PHONE_DIR) && $(GRADLE) assembleDebug --console=plain 2>&1 | tail -3; \
-	_exit=$${PIPESTATUS[0]}; \
-	if [ $$_exit -eq 0 ]; then $(call _ok,vibe-control built); else $(call _fail,vibe-control build failed); exit $$_exit; fi
+	@_log=$$(mktemp); \
+	cd $(PHONE_DIR) && $(GRADLE) assembleDebug --console=plain >$$_log 2>&1; _rc=$$?; \
+	if [ $$_rc -eq 0 ]; then \
+		tail -1 $$_log; \
+		$(call _ok,vibe-control built); \
+	else \
+		echo "--- build output ---"; \
+		grep -E '^[we]: |error:|FAILED|ERROR' $$_log || tail -30 $$_log; \
+		echo "--- end ---"; \
+		$(call _fail,vibe-control build failed); \
+		rm -f $$_log; exit $$_rc; \
+	fi; rm -f $$_log
 
 # ═══════════════════════════════════════════════
 # Install
