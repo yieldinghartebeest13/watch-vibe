@@ -1,0 +1,71 @@
+name: Build Canary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build ${{ matrix.apk-name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: wear-vibe
+            apk-name: WearVibe
+          - project: vibe-control
+            apk-name: WearVibeControl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ${{ matrix.project }}/gradlew
+
+      - name: Build Release APK
+        working-directory: ${{ matrix.project }}
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Sign APK (canary)
+        run: |
+          UNSIGNED="${{ matrix.project }}/app/build/outputs/apk/release/app-release-unsigned.apk"
+          SIGNED="${{ matrix.project }}/app/build/outputs/apk/release/${{ matrix.apk-name }}.apk"
+
+          # Generate a one-off debug keystore for canary signing
+          keytool -genkey -v \
+            -keystore /tmp/canary.keystore \
+            -alias canary \
+            -keyalg RSA -keysize 2048 -validity 365 \
+            -storepass android -keypass android \
+            -dname "CN=Canary CI, OU=CI, O=WatchVibe, L=N/A, ST=N/A, C=US" \
+            -noprompt 2>/dev/null
+
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+            --ks /tmp/canary.keystore \
+            --ks-pass pass:android \
+            "$UNSIGNED"
+
+          mv "$UNSIGNED" "$SIGNED"
+          echo "Signed canary APK → $SIGNED"
+
+      - name: Upload canary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.apk-name }}-canary
+          path: ${{ matrix.project }}/app/build/outputs/apk/release/${{ matrix.apk-name }}.apk
+          if-no-files-found: error

@@ -6,6 +6,7 @@ build
 xapk_extracted/
 .pi/
 .env
+*.keystore
 INSTALLED_UTILS.md
 
 !.crew/artifacts/
