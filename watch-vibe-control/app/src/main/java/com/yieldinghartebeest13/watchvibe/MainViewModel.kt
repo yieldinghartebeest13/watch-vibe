@@ -1,6 +1,8 @@
 package com.yieldinghartebeest13.watchvibe
 
 import android.app.Application
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -198,6 +200,8 @@ class MainViewModel(
                 stopHeartbeat()
                 stopConnectionMonitor()
             }
+            // Stop the foreground service — no vibration to protect.
+            stopPingService()
         } else {
             _isVibrating.value = true
             val modeLabel = AppConstants.MODE_LABELS[currentMode] ?: "Unknown"
@@ -208,6 +212,11 @@ class MainViewModel(
             if (!isInForeground) {
                 startHeartbeat()
             }
+            // Start a foreground service that keeps the ping heartbeat
+            // alive when the app is backgrounded. Android's background
+            // execution limits would otherwise freeze the ViewModel
+            // coroutine and the watch's lease expires → vibration stops.
+            startPingService(modeLabel, speedLabel)
         }
 
         viewModelScope.launch {
@@ -215,10 +224,28 @@ class MainViewModel(
         }
     }
 
+    // ── Foreground service management ────────────────────
+
+    private fun startPingService(modeLabel: String, speedLabel: String) {
+        val context = getApplication<Application>()
+        val intent = Intent(context, PingForegroundService::class.java).apply {
+            action = PingForegroundService.ACTION_UPDATE_STATUS
+            putExtra(PingForegroundService.EXTRA_MODE_LABEL, modeLabel)
+            putExtra(PingForegroundService.EXTRA_SPEED_LABEL, speedLabel)
+        }
+        ContextCompat.startForegroundService(context, intent)
+    }
+
+    private fun stopPingService() {
+        val context = getApplication<Application>()
+        context.stopService(Intent(context, PingForegroundService::class.java))
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopHeartbeat()
         stopConnectionMonitor()
+        stopPingService()
         viewModelScope.launch {
             wearDataLayer.sendControl(AppConstants.MODE_STOP, 0, 0)
         }
