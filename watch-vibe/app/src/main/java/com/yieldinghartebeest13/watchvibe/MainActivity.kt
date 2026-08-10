@@ -21,6 +21,7 @@ class MainActivity : Activity() {
     private lateinit var modeText: TextView
     private lateinit var levelText: TextView
     private var exitRequested: Boolean = false
+    private var minimizeInProgress: Boolean = false
     private val statusReceiver = StatusReceiver()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +45,7 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         exitRequested = false
+        minimizeInProgress = false
         val filter = IntentFilter().apply {
             addAction(VibrationForegroundService.BROADCAST_STATUS)
             addAction(VibrationForegroundService.ACTION_MINIMIZE)
@@ -70,6 +72,10 @@ class MainActivity : Activity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        if (minimizeInProgress) {
+            minimizeInProgress = false
+            return
+        }
         if (!exitRequested) {
             exitRequested = true
             Log.d(TAG, "User dismissed — emergency stop")
@@ -124,6 +130,7 @@ class MainActivity : Activity() {
                 }
                 VibrationForegroundService.ACTION_MINIMIZE -> {
                     Log.d(TAG, "Minimize")
+                    minimizeInProgress = true
                     moveTaskToBack(true)
                 }
             }

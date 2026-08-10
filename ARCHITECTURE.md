@@ -226,13 +226,12 @@ called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
 watches for `/crown_exit` messages from the watch. Started in
 `MainViewModel.startConnectionMonitor()`, stopped in `stopConnectionMonitor()`.
 
-**Known edge case — `moveTaskToBack(true)` re-entrancy:**
-When the phone sends `/minimize` (app goes to background while idle), the
-watch's `StatusReceiver` calls `moveTaskToBack(true)`, which itself triggers
-`onUserLeaveHint()` → fires a redundant `ACTION_EMERGENCY_STOP`. This is
-currently **benign** (leases are already zeroed, phone is already minimized)
-but produces a wasteful `/crown_exit` round-trip. A `minimizeInProgress`
-guard flag would eliminate it.
+**`moveTaskToBack(true)` re-entrancy (fixed):**
+When the phone sends `/minimize`, the watch's `StatusReceiver` calls
+`moveTaskToBack(true)`, which itself triggers `onUserLeaveHint()`. A
+`minimizeInProgress` guard flag suppresses the redundant emergency stop.
+Without it this would fire a wasteful `/crown_exit` round-trip to an
+already-minimized phone.
 
 ### 12. Watch battery monitoring (watch → phone)
 
