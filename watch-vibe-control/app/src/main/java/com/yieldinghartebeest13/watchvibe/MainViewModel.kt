@@ -53,6 +53,10 @@ class MainViewModel(
     private val _statusText = MutableStateFlow("Ready")
     val statusText: StateFlow<String> = _statusText.asStateFlow()
 
+    // One-shot event: true when watch crown-exited → phone should minimize
+    private val _crownExitRequested = MutableStateFlow(false)
+    val crownExitRequested: StateFlow<Boolean> = _crownExitRequested.asStateFlow()
+
     init {
         // If the UI was showing an active mode before process death,
         // re-send it so the watch state and UI state are consistent.
@@ -119,6 +123,9 @@ class MainViewModel(
             }
         }
 
+        // Listener for crown exit from watch (emergency stop)
+        wearDataLayer.startMessageListener { onCrownExit() }
+
         // Listener for real-time changes
         val listener = CapabilityClient.OnCapabilityChangedListener { capInfo ->
             val connected = capInfo.nodes.isNotEmpty()
@@ -148,6 +155,7 @@ class MainViewModel(
                 // Listener may already be unregistered — safe to ignore
             }
         }
+        wearDataLayer.stopMessageListener()
     }
 
     fun checkWearConnection() {
@@ -239,6 +247,27 @@ class MainViewModel(
     private fun stopPingService() {
         val context = getApplication<Application>()
         context.stopService(Intent(context, PingForegroundService::class.java))
+    }
+
+    fun onCrownExitHandled() {
+        _crownExitRequested.value = false
+    }
+
+    /**
+     * Called when the watch sends a crown-exit message (emergency stop).
+     * Resets UI state, stops services, and signals the Activity to minimize.
+     */
+    private fun onCrownExit() {
+        viewModelScope.launch {
+            _mode.value = AppConstants.MODE_STOP
+            _isVibrating.value = false
+            _statusText.value = "Ready"
+            savedStateHandle[KEY_MODE] = AppConstants.MODE_STOP
+            stopHeartbeat()
+            stopConnectionMonitor()
+            stopPingService()
+            _crownExitRequested.value = true
+        }
     }
 
     override fun onCleared() {

@@ -198,6 +198,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        lifecycleScope.launch {
+            viewModel.crownExitRequested.collectLatest { requested ->
+                if (requested) {
+                    moveTaskToBack(true)
+                    viewModel.onCrownExitHandled()
+                }
+            }
+        }
     }
 
     // ── Animation methods ──────────────────────────────────

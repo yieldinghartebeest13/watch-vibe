@@ -24,12 +24,13 @@ Two companion apps that control a watch's vibration motor from your phone.
 │  │  mode, level (SavedStateHandle)    │  │     │  │  Mode name as primary status  │  │
 │  │  Heartbeat (mode-aware, bg-safe)   │  │     │  │  Speed label below            │  │
 │  │  CapabilityClient.addListener      │  │     │  │  All touch/back blocked       │  │
-│  └──────────┬─────────────────────────┘  │     │  │  Crown long-press to exit     │  │
+│  └──────────┬─────────────────────────┘  │     │  │  onUserLeaveHint → emergency   │  │
 │             │                            │     │  └──────────────────────────────┘  │
 │  ┌──────────▼─────────────────────────┐  │     │                                    │
 │  │ WearDataLayer                      │  │     │  ┌──────────────────────────────┐  │
 │  │  DataClient + MessageClient        │  │     │  │ VibrationDataLayerService    │  │
 │  │  CapabilityClient (watch det.)     │  │     │  │  Wake-up only → starts FGS   │  │
+│  │  ★ Incoming message listener       │  │     │  └──────────────────────────────┘  │
 │  └────────────────────────────────────┘  │     │  └──────────────────────────────┘  │
 └──────────────────────────────────────────┘     │  ┌──────────────────────────────┐  │
                   │                              │  │ BootReceiver                 │  │
@@ -37,6 +38,7 @@ Two companion apps that control a watch's vibration motor from your phone.
          Wear OS Data Layer                       │  └──────────────────────────────┘  │
          paths: /control, /ping,                    └────────────────────────────────────┘
                 /launch, /minimize
+         ← /crown_exit (watch→phone)
          keys: wear_mode, wear_level,
                 wear_intensity
 ```
@@ -186,6 +188,41 @@ backgrounding lets the user dismiss the watch instantly by switching apps.
 When vibration is active, the watch NEVER minimizes — the user explicitly
 started vibration and may want to monitor status on their wrist.
 
+### 11. Emergency stop (watch → phone)
+
+When the user dismisses the watch UI while vibration is active (phone out of
+reach), the watch triggers an emergency stop.
+
+**Detection: `onUserLeaveHint()`**
+
+Fires when the user dismisses the Activity (crown press, swipe away). Works
+identically locked or unlocked — the Activity renders above the keyguard via
+`setShowWhenLocked(true)` + `setTurnScreenOn(true)`.
+
+`exitRequested` flag prevents double-firing and is reset in `onStart()` so
+re-launches (via `SINGLE_TOP`) start with a clean slate. No `finish()` is
+called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
+`startActivity()` calls on a locked device.
+
+**What happens:**
+1. User dismisses watch Activity → `onUserLeaveHint()`
+2. `ACTION_EMERGENCY_STOP` sent to `VibrationForegroundService`
+3. Service cancels vibration, zeroes **both** leases, sets `phoneConnected = false`,
+   broadcasts status
+4. Service sends `/crown_exit` message to phone via `MessageClient`
+5. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
+6. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
+   connection monitor, and ping foreground service
+7. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
+   (minimizes the phone app)
+8. When the phone app is reopened, `onForeground()` sends `/launch` →
+   watch wakes up and shows UI again
+
+**Phone message listener:**
+`WearDataLayer` registers a `MessageClient.OnMessageReceivedListener` that
+watches for `/crown_exit` messages from the watch. Started in
+`MainViewModel.startConnectionMonitor()`, stopped in `stopConnectionMonitor()`.
+
 ---
 
 ## Vibration Modes (6 total)
@@ -253,12 +290,17 @@ Tap active tile again = stop.
 │                              │
 │       [vibration icon]       │
 │                              │
-│  Long-press crown to exit    │
+│  Press crown to dismiss /    │
+│  stop vibration              │
 └──────────────────────────────┘
 ```
 
-Status line shows: mode name when active, "Ready" when idle, "Waiting..." when disconnected.
-All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
+Status line shows: mode name when active, "Ready" when idle, "Waiting..."
+when disconnected. All touch/back/swipe blocked (kiosk mode).
+
+Exit (emergency stop) via `onUserLeaveHint()` when the user dismisses the
+Activity. Works identically locked or unlocked — the Activity renders above
+the keyguard via `setShowWhenLocked(true)`.
 
 ---
 
@@ -278,6 +320,7 @@ All touch/back/swipe blocked. Only physical crown long-press (~2s) exits.
 | Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
 | Boot | BootReceiver starts FGS | — |
 | Auto-minimize | Lease-expiry (30s delay) + phone-background (immediate) when idle | Phone sends /minimize on background |
+| Emergency stop | Watch sends /crown_exit on dismiss; phone minimizes | Phone listens for /crown_exit, resets UI |
 
 ---
 

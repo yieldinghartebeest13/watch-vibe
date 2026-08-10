@@ -24,6 +24,9 @@ class WearDataLayer(context: Context) {
     private val sessionId: Long = System.currentTimeMillis()
     private var pingCounter: Long = 0
 
+    // Incoming message listener from watch (crown exit, etc.)
+    private var messageListener: MessageClient.OnMessageReceivedListener? = null
+
     companion object {
         private const val TAG = "VibeWearDL"
     }
@@ -138,6 +141,38 @@ class WearDataLayer(context: Context) {
                 Log.d(TAG, "Minimize failed", e)
             }
         }
+    }
+
+    // ── Incoming message listener (watch → phone) ──────────
+
+    /**
+     * Start listening for messages from the watch.
+     * Currently only watches for [AppConstants.PATH_CROWN_EXIT].
+     */
+    fun startMessageListener(onCrownExit: () -> Unit) {
+        val listener = MessageClient.OnMessageReceivedListener { event ->
+            when (event.path) {
+                AppConstants.PATH_CROWN_EXIT -> {
+                    Log.d(TAG, "Crown exit received from watch")
+                    onCrownExit()
+                }
+                else -> {
+                    Log.d(TAG, "Unknown incoming message: ${event.path}")
+                }
+            }
+        }
+        messageListener = listener
+        messageClient.addListener(listener)
+        Log.d(TAG, "Message listener registered (incoming)")
+    }
+
+    /** Stop listening for messages from the watch. */
+    fun stopMessageListener() {
+        messageListener?.let {
+            messageClient.removeListener(it)
+            Log.d(TAG, "Message listener unregistered (incoming)")
+        }
+        messageListener = null
     }
 
     suspend fun isWearConnected(): Boolean {

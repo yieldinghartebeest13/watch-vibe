@@ -5,34 +5,21 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.TextView
 
-/**
- * Wear OS activity in kiosk/pinned mode:
- *  - All touch is consumed (no touch interaction)
- *  - Back gesture is blocked (only physical crown/button exits)
- *  - Displays current vibration status from the foreground service
- *  - Long-press the physical STEM button (KEYCODE_STEM_PRIMARY) to exit
- *
- * The VibrationForegroundService handles all Data Layer communication
- * and vibration control. This Activity is purely a status display.
- */
 class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "VibeAct"
-        private const val LONG_PRESS_MS = 2000L
     }
 
     private lateinit var modeText: TextView
     private lateinit var levelText: TextView
-
-    private var stemPressStart: Long = 0
     private var exitRequested: Boolean = false
     private val statusReceiver = StatusReceiver()
 
@@ -40,6 +27,10 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate")
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+        }
+        setTurnScreenOn(true)
         setContentView(R.layout.activity_main)
 
         modeText = findViewById(R.id.modeText)
@@ -47,12 +38,12 @@ class MainActivity : Activity() {
 
         setupKioskMode()
         startForegroundService()
-
-        Log.d(TAG, "onCreate done — kiosk active, touch disabled")
+        Log.d(TAG, "onCreate done")
     }
 
     override fun onStart() {
         super.onStart()
+        exitRequested = false
         val filter = IntentFilter().apply {
             addAction(VibrationForegroundService.BROADCAST_STATUS)
             addAction(VibrationForegroundService.ACTION_MINIMIZE)
@@ -62,7 +53,6 @@ class MainActivity : Activity() {
         } else {
             registerReceiver(statusReceiver, filter)
         }
-        // Request current status immediately so display is never stale
         val query = Intent(this, VibrationForegroundService::class.java).apply {
             action = VibrationForegroundService.ACTION_QUERY_STATUS
         }
@@ -75,73 +65,30 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
-        try {
-            unregisterReceiver(statusReceiver)
-        } catch (_: Exception) {}
+        try { unregisterReceiver(statusReceiver) } catch (_: Exception) {}
     }
 
-    // ── Kiosk mode: disable all touch and gestures ─────────
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!exitRequested) {
+            exitRequested = true
+            Log.d(TAG, "User dismissed — emergency stop")
+            try {
+                val intent = Intent(this, VibrationForegroundService::class.java).apply {
+                    action = VibrationForegroundService.ACTION_EMERGENCY_STOP
+                }
+                startService(intent)
+            } catch (_: Exception) {}
+        }
+    }
 
     private fun setupKioskMode() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        Log.d(TAG, "Kiosk mode active (touch/back blocked, no screen pinning)")
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = true
     override fun onTouchEvent(event: MotionEvent?): Boolean = true
-
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        return when (keyCode) {
-            KeyEvent.KEYCODE_STEM_PRIMARY,
-            KeyEvent.KEYCODE_STEM_1,
-            KeyEvent.KEYCODE_STEM_2,
-            KeyEvent.KEYCODE_STEM_3 -> {
-                if (stemPressStart == 0L) {
-                    stemPressStart = System.currentTimeMillis()
-                    Log.d(TAG, "Stem press started — hold ${LONG_PRESS_MS}ms to exit")
-                }
-                true
-            }
-            else -> true
-        }
-    }
-
-    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        return when (keyCode) {
-            KeyEvent.KEYCODE_STEM_PRIMARY,
-            KeyEvent.KEYCODE_STEM_1,
-            KeyEvent.KEYCODE_STEM_2,
-            KeyEvent.KEYCODE_STEM_3 -> {
-                val duration = System.currentTimeMillis() - stemPressStart
-                stemPressStart = 0
-                if (duration >= LONG_PRESS_MS && !exitRequested) {
-                    exitRequested = true
-                    Log.d(TAG, "Exit requested via long stem press")
-                    exitKioskAndFinish()
-                } else {
-                    Log.d(TAG, "Short press — ignored ($duration ms)")
-                }
-                true
-            }
-            else -> true
-        }
-    }
-
-    override fun onBackPressed() {
-        Log.d(TAG, "Back blocked")
-    }
-
-    private fun exitKioskAndFinish() {
-        try {
-            val intent = Intent(this, VibrationForegroundService::class.java).apply {
-                action = VibrationForegroundService.ACTION_STOP_VIBRATION
-            }
-            startService(intent)
-        } catch (_: Exception) {}
-        finish()
-    }
-
-    // ── Foreground service ─────────────────────────────────
+    override fun onBackPressed() { Log.d(TAG, "Back blocked") }
 
     private fun startForegroundService() {
         val intent = Intent(this, VibrationForegroundService::class.java)
@@ -150,10 +97,7 @@ class MainActivity : Activity() {
         } else {
             startService(intent)
         }
-        Log.d(TAG, "Foreground service start requested")
     }
-
-    // ── Display update from service broadcasts ─────────────
 
     private fun updateDisplay(mode: Int, level: Int, active: Boolean, phoneConnected: Boolean) {
         modeText.text = when {
@@ -168,8 +112,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // ── Broadcast receiver for service status ──────────────
-
     inner class StatusReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -181,7 +123,7 @@ class MainActivity : Activity() {
                     updateDisplay(mode, level, active, phoneConnected)
                 }
                 VibrationForegroundService.ACTION_MINIMIZE -> {
-                    Log.d(TAG, "Minimize — returning to watch face")
+                    Log.d(TAG, "Minimize")
                     moveTaskToBack(true)
                 }
             }

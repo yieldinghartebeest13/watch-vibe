@@ -35,6 +35,7 @@ class VibrationForegroundService : Service() {
 
         // Actions for binding from Activity
         const val ACTION_STOP_VIBRATION = "com.yieldinghartebeest13.watchvibe.STOP"
+        const val ACTION_EMERGENCY_STOP = "com.yieldinghartebeest13.watchvibe.EMERGENCY_STOP"
         const val ACTION_QUERY_STATUS = "com.yieldinghartebeest13.watchvibe.QUERY_STATUS"
         const val ACTION_MINIMIZE = "com.yieldinghartebeest13.watchvibe.MINIMIZE"
         const val EXTRA_MODE = "mode"
@@ -104,6 +105,16 @@ class VibrationForegroundService : Service() {
             ACTION_STOP_VIBRATION -> {
                 vibratorEngine.cancel()
                 broadcastStatus()
+            }
+            ACTION_EMERGENCY_STOP -> {
+                Log.w(TAG, "EMERGENCY STOP — crown exit, cancelling everything")
+                vibratorEngine.cancel()
+                connectionLeaseExpiry = 0
+                vibrationLeaseExpiry = 0
+                lastCommandTimestamp = 0
+                phoneConnected = false
+                broadcastStatus()
+                sendCrownExitToPhone()
             }
             ACTION_QUERY_STATUS -> {
                 broadcastStatus()
@@ -431,6 +442,29 @@ class VibrationForegroundService : Service() {
         } else {
             cancelMinimize()  // vibration started — don't minimize anymore
             System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
+        }
+    }
+
+    // ── Crown exit to phone ───────────────────────────────
+
+    /** Send a crown-exit message to the phone so it can update UI and minimize. */
+    private fun sendCrownExitToPhone() {
+        serviceScope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@VibrationForegroundService)
+                    .connectedNodes.await()
+                for (node in nodes) {
+                    try {
+                        Wearable.getMessageClient(this@VibrationForegroundService)
+                            .sendMessage(node.id, AppConstants.PATH_CROWN_EXIT, ByteArray(0)).await()
+                        Log.d(TAG, "Crown exit sent to ${node.displayName}")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to send crown exit to ${node.displayName}: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send crown exit: ${e.message}")
+            }
         }
     }
 
