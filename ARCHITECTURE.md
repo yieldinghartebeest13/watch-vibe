@@ -257,7 +257,33 @@ displays a battery icon with percentage next to the connection status.
 - Live state: colored icon + "N%" (red ≤15%, orange ≤30%, neutral >30%)
 - `MainViewModel.watchBatteryLevel: StateFlow<Int>` exposed to UI
 
-### 13. Foreground service background capability is dead code
+### 13. Session stats and history
+
+The phone app records every vibration run and provides aggregated stats
+on a dedicated stats screen.
+
+**Recording:**
+- Session start/end tracked in `MainViewModel.applyVibration()` via
+  `_isVibrating` transitions
+- Runs shorter than 500ms are discarded as accidental taps
+- Rows inserted into SQLite via raw `SQLiteOpenHelper` (no Room dependency)
+
+**Session merging (StatsDb.mergedQuery):**
+- Consecutive runs ≤ 15 minutes apart are merged into one session
+- Pauses ≤ 5 minutes within a session count toward total duration
+- Each merged session tracks its dominant mode (most active time)
+- Mode breakdown aggregates raw run durations, not dominant-per-session
+  (preserves detail when user switches modes mid-session)
+
+**Stats screen (StatsActivity):**
+- Accessed via bar-chart icon (ic_stats.xml) in the main screen header
+- Week / Month / Year tabs with three summary cards (sessions, time, avg)
+- Colored mode breakdown bars proportional to usage
+- Recent sessions list with mode-colored dots, run counts, and durations
+- Uses `suppressMinimize` flag to prevent watch dismissal when opening
+  the stats screen (internal activity transition)
+
+### 14. Foreground service background capability is dead code
 
 The watch app's `VibrationForegroundService` was designed to keep vibration
 running in the background (screen off, activity hidden behind watch face).
@@ -320,7 +346,7 @@ Speed levels (0-3) scale all timings proportionally.
 
 ```
 ┌──────────────────────────────┐
-│  WatchVibe                   │  ← app title
+│  WatchVibe              [📊] │  ← title + stats icon
 │  Connected                   │  ← connection status
 │  🔋 85%                      │  ← watch battery (red/orange/gray)
 │  Constant — Slow             │  ← mode + speed
@@ -400,11 +426,15 @@ app/src/main/
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt       # Shared constants (identical in both projects)
 │   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient + battery request
-│   ├── MainViewModel.kt      # State + heartbeat + SavedStateHandle + watchBatteryLevel
+│   ├── MainViewModel.kt      # State + heartbeat + SavedStateHandle + watchBatteryLevel + stats
 │   ├── MainActivity.kt       # 6-tile UI + waveform animations + controls
+│   ├── StatsActivity.kt      # Session history and aggregated stats
+│   ├── StatsDb.kt            # SQLite session storage with session merging
 │   └── WaveformView.kt       # Mini waveform chart per tile (bitmap-cached)
 └── res/
     ├── layout/activity_main.xml
+    ├── layout/activity_stats.xml
+    ├── drawable/ic_stats.xml
     ├── drawable/ic_battery.xml
     ├── drawable/ic_dots_circle.xml
     ├── drawable/tile_bg.xml

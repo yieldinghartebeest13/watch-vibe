@@ -28,6 +28,7 @@ class MainViewModel(
     }
 
     private val wearDataLayer = WearDataLayer(application)
+    private val statsDb = StatsDb(application)
 
     // Restore mode/level from saved state (survives process death).
     // isVibrating always starts false — the watch state is authoritative.
@@ -64,6 +65,24 @@ class MainViewModel(
     private val _crownExitRequested = MutableStateFlow(false)
     val crownExitRequested: StateFlow<Boolean> = _crownExitRequested.asStateFlow()
 
+    // ── Session stats ────────────────────────────────────
+
+    private val _weeklyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
+    val weeklyStats: StateFlow<StatsDb.MergedStats> = _weeklyStats.asStateFlow()
+
+    private val _monthlyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
+    val monthlyStats: StateFlow<StatsDb.MergedStats> = _monthlyStats.asStateFlow()
+
+    private val _yearlyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
+    val yearlyStats: StateFlow<StatsDb.MergedStats> = _yearlyStats.asStateFlow()
+
+    private val _recentSessions = MutableStateFlow<List<StatsDb.SessionEntry>>(emptyList())
+    val recentSessions: StateFlow<List<StatsDb.SessionEntry>> = _recentSessions.asStateFlow()
+
+    private var sessionStartMs: Long = 0
+    private var sessionMode: Int = 0
+    private var sessionLevel: Int = 0
+
     init {
         // If the UI was showing an active mode before process death,
         // re-send it so the watch state and UI state are consistent.
@@ -71,18 +90,24 @@ class MainViewModel(
         if (restoredMode != AppConstants.MODE_STOP && restoredMode != AppConstants.MODE_PAUSE) {
             applyVibration()
         }
+        refreshStats()
     }
 
     private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
     private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
     private var isInForeground: Boolean = false
+    private var suppressMinimize: Boolean = false
+
+    /** Call before opening an internal activity to prevent the watch minimizing. */
+    fun suppressNextMinimize() { suppressMinimize = true }
 
     /** Called when the activity comes to the foreground. */
     fun onForeground() {
         isInForeground = true
         startHeartbeat()
         startConnectionMonitor()
+        refreshStats()
     }
 
     /**
@@ -93,6 +118,10 @@ class MainViewModel(
      */
     fun onBackground() {
         isInForeground = false
+        if (suppressMinimize) {
+            suppressMinimize = false
+            return
+        }
         if (_mode.value == AppConstants.MODE_STOP || _mode.value == AppConstants.MODE_PAUSE) {
             stopHeartbeat()
             stopConnectionMonitor()
@@ -218,8 +247,10 @@ class MainViewModel(
         val currentLevel = _level.value
 
         if (currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
+            val wasVibrating = _isVibrating.value
             _isVibrating.value = false
             _statusText.value = "Ready"
+            if (wasVibrating) recordSessionEnd()
             // If the user stops vibration while the app is in the background,
             // there's no reason to keep the heartbeat alive.
             if (!isInForeground) {
@@ -229,7 +260,9 @@ class MainViewModel(
             // Stop the foreground service — no vibration to protect.
             stopPingService()
         } else {
+            val wasVibrating = _isVibrating.value
             _isVibrating.value = true
+            if (!wasVibrating) recordSessionStart(currentMode, currentLevel)
             val modeLabel = AppConstants.MODE_LABELS[currentMode] ?: "Unknown"
             val speedLabel = AppConstants.SPEED_LABELS[currentLevel]
             _statusText.value = "$modeLabel - $speedLabel"
@@ -247,6 +280,36 @@ class MainViewModel(
 
         viewModelScope.launch {
             wearDataLayer.sendControl(currentMode, currentLevel, 100)
+        }
+    }
+
+    // ── Session recording ─────────────────────────────────
+
+    private fun recordSessionStart(mode: Int, level: Int) {
+        sessionStartMs = System.currentTimeMillis()
+        sessionMode = mode
+        sessionLevel = level
+    }
+
+    private fun recordSessionEnd() {
+        if (sessionStartMs == 0L) return
+        val durationMs = System.currentTimeMillis() - sessionStartMs
+        sessionStartMs = 0
+        // Ignore ultra-short sessions (<500ms) as accidental taps
+        if (durationMs < 500) return
+        viewModelScope.launch {
+            statsDb.insert(sessionMode, sessionLevel, durationMs, System.currentTimeMillis())
+            refreshStats()
+        }
+    }
+
+    fun refreshStats() {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            _weeklyStats.value = statsDb.mergedQuery(now - 7 * 24 * 3600_000L)
+            _monthlyStats.value = statsDb.mergedQuery(now - 30 * 24 * 3600_000L)
+            _yearlyStats.value = statsDb.mergedQuery(now - 365 * 24 * 3600_000L)
+            _recentSessions.value = statsDb.recentSessions(20)
         }
     }
 

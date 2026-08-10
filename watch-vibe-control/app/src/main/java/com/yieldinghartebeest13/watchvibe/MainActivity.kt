@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var batteryRow: LinearLayout
     private lateinit var batteryIcon: ImageView
     private lateinit var batteryText: TextView
+    private lateinit var btnStats: ImageView
     private lateinit var btnStop: Button
     private lateinit var btnMore: Button
     private lateinit var btnLess: Button
@@ -114,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         batteryRow = findViewById(R.id.batteryRow)
         batteryIcon = findViewById(R.id.batteryIcon)
         batteryText = findViewById(R.id.batteryText)
+        btnStats = findViewById(R.id.btnStats)
         btnStop = findViewById(R.id.btnStop)
         btnMore = findViewById(R.id.btnMore)
         btnLess = findViewById(R.id.btnLess)
@@ -148,6 +150,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupListeners() {
+        btnStats.setOnClickListener {
+            viewModel.suppressNextMinimize()
+            startActivity(android.content.Intent(this, StatsActivity::class.java))
+        }
         for (cfg in tileConfigs) {
             tileMap[cfg.mode]?.container?.setOnClickListener {
                 if (viewModel.mode.value == cfg.mode && viewModel.isVibrating.value) {
