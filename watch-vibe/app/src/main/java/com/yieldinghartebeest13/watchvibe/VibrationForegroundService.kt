@@ -5,8 +5,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -71,6 +75,8 @@ class VibrationForegroundService : Service() {
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
     private var minimizeJob: Job? = null
+    private var batteryReceiver: BroadcastReceiver? = null
+    @Volatile private var lastBatteryLevel: Int = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -95,6 +101,7 @@ class VibrationForegroundService : Service() {
         createNotificationChannel()
         startListeners()
         startHeartbeatMonitor()
+        startBatteryMonitor()
         acquireWakeLock()
     }
 
@@ -132,6 +139,7 @@ class VibrationForegroundService : Service() {
         heartbeatChecker?.cancel()
         vibratorEngine.cancel()
         stopListeners()
+        stopBatteryMonitor()
         releaseWakeLock()
         serviceScope.cancel()
         VibrationDataLayerService.isForegroundServiceRunning = false
@@ -293,6 +301,12 @@ class VibrationForegroundService : Service() {
                     Log.d(TAG, "Minimize message from phone")
                     sendBroadcast(Intent(ACTION_MINIMIZE).apply { setPackage(packageName) })
                 }
+                AppConstants.PATH_BATTERY_REQUEST -> {
+                    Log.d(TAG, "Battery request from phone")
+                    if (lastBatteryLevel >= 0) {
+                        sendBatteryToPhone(lastBatteryLevel)
+                    }
+                }
                 AppConstants.PATH_PING -> {
                     val body = String(event.data)
                     val parts = body.split(",")
@@ -324,6 +338,10 @@ class VibrationForegroundService : Service() {
                 // Phone just appeared — give leases a fresh start
                 // so pings have time to arrive before expiry.
                 extendLease()
+                // Re-send battery level in case the phone just connected
+                if (lastBatteryLevel >= 0) {
+                    sendBatteryToPhone(lastBatteryLevel)
+                }
             }
 
             if (wasConnected && !phoneConnected) {
@@ -442,6 +460,63 @@ class VibrationForegroundService : Service() {
         } else {
             cancelMinimize()  // vibration started — don't minimize anymore
             System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
+        }
+    }
+
+    // ── Battery monitor ──────────────────────────────────
+
+    private fun startBatteryMonitor() {
+        // 1. Synchronous initial read — no waiting for a broadcast
+        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+        lastBatteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        Log.d(TAG, "Battery initial: $lastBatteryLevel%")
+        sendBatteryToPhone(lastBatteryLevel)
+
+        // 2. Receiver for subsequent changes
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent == null) return
+                val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                val pct = if (scale > 0) (level * 100) / scale else -1
+                if (pct != lastBatteryLevel) {
+                    lastBatteryLevel = pct
+                    Log.d(TAG, "Battery level: $pct%")
+                    sendBatteryToPhone(pct)
+                }
+            }
+        }
+        batteryReceiver = receiver
+        registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        Log.d(TAG, "Battery monitor registered")
+    }
+
+    private fun stopBatteryMonitor() {
+        batteryReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+        }
+        batteryReceiver = null
+    }
+
+    /** Send battery level to phone via MessageClient. */
+    private fun sendBatteryToPhone(level: Int) {
+        serviceScope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@VibrationForegroundService)
+                    .connectedNodes.await()
+                for (node in nodes) {
+                    try {
+                        val payload = level.toString().toByteArray()
+                        Wearable.getMessageClient(this@VibrationForegroundService)
+                            .sendMessage(node.id, AppConstants.PATH_BATTERY, payload).await()
+                        Log.d(TAG, "Battery $level% sent to ${node.displayName}")
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Battery send failed to ${node.displayName}: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Battery send failed: ${e.message}")
+            }
         }
     }
 

@@ -1,0 +1,29 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <!-- Battery body outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="1.8"
+        android:strokeColor="@android:color/white"
+        android:pathData="M6.5,8.5 L17.5,8.5 A1,1 0,0,1 18.5,9.5 L18.5,14.5 A1,1 0,0,1 17.5,15.5 L6.5,15.5 A1,1 0,0,1 5.5,14.5 L5.5,9.5 A1,1 0,0,1 6.5,8.5 Z" />
+    <!-- Battery terminal (nub on right) -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M18.5,10.5 L20,10.5 A0.5,0.5 0,0,1 20.5,11 L20.5,13 A0.5,0.5 0,0,1 20,13.5 L18.5,13.5 Z" />
+    <!-- Fill bar 1 (rightmost) -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M15.5,10 L17,10 L17,14 L15.5,14 Z" />
+    <!-- Fill bar 2 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,10 L13.5,10 L13.5,14 L12,14 Z" />
+    <!-- Fill bar 3 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M8.5,10 L10,10 L10,14 L8.5,14 Z" />
+</vector>

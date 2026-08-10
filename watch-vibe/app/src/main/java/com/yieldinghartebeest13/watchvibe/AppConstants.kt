@@ -27,11 +27,14 @@ object AppConstants {
     const val PATH_LAUNCH = "/launch"
     const val PATH_MINIMIZE = "/minimize"
     const val PATH_CROWN_EXIT = "/crown_exit"
+    const val PATH_BATTERY = "/battery"
+    const val PATH_BATTERY_REQUEST = "/battery_request"
 
     // ── Wear Data Layer keys ───────────────────────────────
     const val KEY_MODE = "wear_mode"
     const val KEY_LEVEL = "wear_level"
     const val KEY_INTENSITY = "wear_intensity"
+    const val KEY_BATTERY_LEVEL = "battery_level"
 
     // ── Capability ─────────────────────────────────────────
     const val CAPABILITY_VIBRATION = "vibration_control"

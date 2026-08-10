@@ -30,7 +30,8 @@ Two companion apps that control a watch's vibration motor from your phone.
 │  │ WearDataLayer                      │  │     │  ┌──────────────────────────────┐  │
 │  │  DataClient + MessageClient        │  │     │  │ VibrationDataLayerService    │  │
 │  │  CapabilityClient (watch det.)     │  │     │  │  Wake-up only → starts FGS   │  │
-│  │  ★ Incoming message listener       │  │     │  └──────────────────────────────┘  │
+│  │  ★ Incoming message listener       │  │     │  │  ★ Battery monitor + broadcast │  │
+  │  ★ Battery request on connect       │  │     │  └──────────────────────────────┘  │
 │  └────────────────────────────────────┘  │     │  └──────────────────────────────┘  │
 └──────────────────────────────────────────┘     │  ┌──────────────────────────────┐  │
                   │                              │  │ BootReceiver                 │  │
@@ -39,8 +40,10 @@ Two companion apps that control a watch's vibration motor from your phone.
          paths: /control, /ping,                    └────────────────────────────────────┘
                 /launch, /minimize
          ← /crown_exit (watch→phone)
+         → /battery_request (phone→watch)
+         ← /battery (watch→phone)
          keys: wear_mode, wear_level,
-                wear_intensity
+                wear_intensity, battery_level
 ```
 
 ## Critical Design Decisions
@@ -223,6 +226,30 @@ called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
 watches for `/crown_exit` messages from the watch. Started in
 `MainViewModel.startConnectionMonitor()`, stopped in `stopConnectionMonitor()`.
 
+### 12. Watch battery monitoring (watch → phone)
+
+The watch monitors its battery level and sends it to the phone. The phone
+displays a battery icon with percentage next to the connection status.
+
+**Push (watch-initiated):**
+- On service start: synchronous read via `BatteryManager.getIntProperty()`
+- On level change: `BroadcastReceiver` for `ACTION_BATTERY_CHANGED`
+- On phone reconnect: capability listener triggers re-send
+- Sent via `MessageClient` on path `/battery`
+
+**Pull (phone-initiated):**
+- Phone calls `requestBattery()` on every `startConnectionMonitor()` (app open)
+- Sends `/battery_request` message to watch
+- Watch replies with current `lastBatteryLevel` on `/battery`
+- Eliminates race conditions: phone always gets data regardless of startup order
+
+**Phone UI:**
+- Battery row always visible (never hidden)
+- `watchBatteryPending` flag: `true` until first reply received
+- Pending state: dim gray icon + "--%" placeholder
+- Live state: colored icon + "N%" (red ≤15%, orange ≤30%, neutral >30%)
+- `MainViewModel.watchBatteryLevel: StateFlow<Int>` exposed to UI
+
 ---
 
 ## Vibration Modes (6 total)
@@ -258,6 +285,7 @@ Speed levels (0-3) scale all timings proportionally.
 ┌──────────────────────────────┐
 │  WatchVibe                   │  ← app title
 │  Connected                   │  ← connection status
+│  🔋 85%                      │  ← watch battery (red/orange/gray)
 │  Constant — Slow             │  ← mode + speed
 ├──────────┬──────────┬─────────┤
 │ CONSTANT │INTERMITT.│  RAMP   │
@@ -321,6 +349,7 @@ the keyguard via `setShowWhenLocked(true)`.
 | Boot | BootReceiver starts FGS | — |
 | Auto-minimize | Lease-expiry (30s delay) + phone-background (immediate) when idle | Phone sends /minimize on background |
 | Emergency stop | Watch sends /crown_exit on dismiss; phone minimizes | Phone listens for /crown_exit, resets UI |
+| Battery monitor | Push: sync read + broadcast on change; Pull: phone requests on connect | Phone displays battery icon + percentage |
 
 ---
 
@@ -333,12 +362,13 @@ app/src/main/
 ├── AndroidManifest.xml
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt       # Shared constants (identical in both projects)
-│   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient
-│   ├── MainViewModel.kt      # State + mode-aware heartbeat + SavedStateHandle
+│   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient + battery request
+│   ├── MainViewModel.kt      # State + heartbeat + SavedStateHandle + watchBatteryLevel
 │   ├── MainActivity.kt       # 6-tile UI + waveform animations + controls
 │   └── WaveformView.kt       # Mini waveform chart per tile (bitmap-cached)
 └── res/
     ├── layout/activity_main.xml
+    ├── drawable/ic_battery.xml
     ├── drawable/ic_dots_circle.xml
     ├── drawable/tile_bg.xml
     └── drawable/tile_bg_pause_btn.xml
@@ -352,7 +382,7 @@ app/src/main/
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
-│   ├── VibrationForegroundService.kt # Listeners + lease monitor + dead-man's switch
+│   ├── VibrationForegroundService.kt # Listeners + lease monitor + dead-man's switch + battery monitor
 │   ├── VibrationDataLayerService.kt  # Wake-up only (static flag check)
 │   ├── BootReceiver.kt               # Auto-start on reboot
 │   └── MainActivity.kt               # Kiosk mode display

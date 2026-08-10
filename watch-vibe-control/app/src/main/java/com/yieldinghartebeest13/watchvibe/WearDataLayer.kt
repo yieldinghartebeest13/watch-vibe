@@ -146,15 +146,42 @@ class WearDataLayer(context: Context) {
     // ── Incoming message listener (watch → phone) ──────────
 
     /**
-     * Start listening for messages from the watch.
-     * Currently only watches for [AppConstants.PATH_CROWN_EXIT].
+     * Request the watch to send its current battery level.
+     * The reply arrives via the [startMessageListener] battery callback.
      */
-    fun startMessageListener(onCrownExit: () -> Unit) {
+    suspend fun requestBattery() {
+        withContext(Dispatchers.IO) {
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                for (node in nodes) {
+                    try {
+                        messageClient.sendMessage(node.id, AppConstants.PATH_BATTERY_REQUEST, ByteArray(0)).await()
+                        Log.d(TAG, "Battery request sent to ${node.displayName}")
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Battery request failed to ${node.displayName}: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Battery request failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Start listening for messages from the watch.
+     * Handles [AppConstants.PATH_CROWN_EXIT] and [AppConstants.PATH_BATTERY].
+     */
+    fun startMessageListener(onCrownExit: () -> Unit, onBatteryUpdate: (Int) -> Unit = {}) {
         val listener = MessageClient.OnMessageReceivedListener { event ->
             when (event.path) {
                 AppConstants.PATH_CROWN_EXIT -> {
                     Log.d(TAG, "Crown exit received from watch")
                     onCrownExit()
+                }
+                AppConstants.PATH_BATTERY -> {
+                    val level = String(event.data).toIntOrNull() ?: -1
+                    Log.d(TAG, "Battery update from watch: $level%")
+                    if (level in 0..100) onBatteryUpdate(level)
                 }
                 else -> {
                     Log.d(TAG, "Unknown incoming message: ${event.path}")

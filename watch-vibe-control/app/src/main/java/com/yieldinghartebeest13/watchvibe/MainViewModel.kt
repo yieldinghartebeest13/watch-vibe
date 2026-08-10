@@ -50,6 +50,13 @@ class MainViewModel(
     private val _watchConnected = MutableStateFlow(false)
     val watchConnected: StateFlow<Boolean> = _watchConnected.asStateFlow()
 
+    private val _watchBatteryLevel = MutableStateFlow(-1)
+    val watchBatteryLevel: StateFlow<Int> = _watchBatteryLevel.asStateFlow()
+
+    // Battery is pending until we get the first reply from the watch
+    private val _watchBatteryPending = MutableStateFlow(true)
+    val watchBatteryPending: StateFlow<Boolean> = _watchBatteryPending.asStateFlow()
+
     private val _statusText = MutableStateFlow("Ready")
     val statusText: StateFlow<String> = _statusText.asStateFlow()
 
@@ -123,8 +130,19 @@ class MainViewModel(
             }
         }
 
-        // Listener for crown exit from watch (emergency stop)
-        wearDataLayer.startMessageListener { onCrownExit() }
+        // Listener for crown exit from watch (emergency stop) and battery updates
+        wearDataLayer.startMessageListener(
+            onCrownExit = { onCrownExit() },
+            onBatteryUpdate = { level ->
+                _watchBatteryLevel.value = level
+                _watchBatteryPending.value = false
+            }
+        )
+
+        // Actively request current battery level from the watch
+        viewModelScope.launch {
+            wearDataLayer.requestBattery()
+        }
 
         // Listener for real-time changes
         val listener = CapabilityClient.OnCapabilityChangedListener { capInfo ->

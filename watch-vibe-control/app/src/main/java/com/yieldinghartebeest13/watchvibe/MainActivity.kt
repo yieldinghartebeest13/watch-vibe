@@ -12,6 +12,7 @@ import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -23,6 +24,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var viewModel: MainViewModel
     private lateinit var statusText: TextView
     private lateinit var wearStatus: TextView
+    private lateinit var batteryRow: LinearLayout
+    private lateinit var batteryIcon: ImageView
+    private lateinit var batteryText: TextView
     private lateinit var btnStop: Button
     private lateinit var btnMore: Button
     private lateinit var btnLess: Button
@@ -107,6 +111,9 @@ class MainActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.statusText)
         wearStatus = findViewById(R.id.wearStatus)
+        batteryRow = findViewById(R.id.batteryRow)
+        batteryIcon = findViewById(R.id.batteryIcon)
+        batteryText = findViewById(R.id.batteryText)
         btnStop = findViewById(R.id.btnStop)
         btnMore = findViewById(R.id.btnMore)
         btnLess = findViewById(R.id.btnLess)
@@ -173,6 +180,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
+            viewModel.watchBatteryLevel.collectLatest { level ->
+                updateBatteryDisplay(level)
+            }
+        }
+        lifecycleScope.launch {
+            viewModel.watchBatteryPending.collectLatest { pending ->
+                // Re-apply display when pending state changes
+                updateBatteryDisplay(viewModel.watchBatteryLevel.value)
+            }
+        }
+        lifecycleScope.launch {
             viewModel.level.collectLatest { lvl ->
                 speedLabel.text = "Speed: ${AppConstants.SPEED_LABELS[lvl.coerceIn(0, 3)]}"
             }
@@ -206,6 +224,36 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    // ── Battery display ──────────────────────────────────
+
+    private fun updateBatteryDisplay(level: Int) {
+        val pending = viewModel.watchBatteryPending.value
+
+        if (pending) {
+            batteryIcon.setColorFilter(Color.parseColor("#606070"))  // dim placeholder
+            batteryText.text = "--%"
+            batteryText.setTextColor(Color.parseColor("#606070"))
+            return
+        }
+
+        if (level < 0 || level > 100) {
+            batteryIcon.setColorFilter(Color.parseColor("#606070"))
+            batteryText.text = "--%"
+            batteryText.setTextColor(Color.parseColor("#606070"))
+            return
+        }
+
+        batteryText.text = "$level%"
+
+        val color = when {
+            level <= 15 -> Color.parseColor("#e74c3c")  // red
+            level <= 30 -> Color.parseColor("#f39c12")  // orange
+            else -> Color.parseColor("#a0a0b0")          // neutral
+        }
+        batteryIcon.setColorFilter(color)
+        batteryText.setTextColor(color)
     }
 
     // ── Animation methods ──────────────────────────────────
