@@ -226,6 +226,14 @@ called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
 watches for `/crown_exit` messages from the watch. Started in
 `MainViewModel.startConnectionMonitor()`, stopped in `stopConnectionMonitor()`.
 
+**Known edge case — `moveTaskToBack(true)` re-entrancy:**
+When the phone sends `/minimize` (app goes to background while idle), the
+watch's `StatusReceiver` calls `moveTaskToBack(true)`, which itself triggers
+`onUserLeaveHint()` → fires a redundant `ACTION_EMERGENCY_STOP`. This is
+currently **benign** (leases are already zeroed, phone is already minimized)
+but produces a wasteful `/crown_exit` round-trip. A `minimizeInProgress`
+guard flag would eliminate it.
+
 ### 12. Watch battery monitoring (watch → phone)
 
 The watch monitors its battery level and sends it to the phone. The phone
@@ -249,6 +257,36 @@ displays a battery icon with percentage next to the connection status.
 - Pending state: dim gray icon + "--%" placeholder
 - Live state: colored icon + "N%" (red ≤15%, orange ≤30%, neutral >30%)
 - `MainViewModel.watchBatteryLevel: StateFlow<Int>` exposed to UI
+
+### 13. Foreground service background capability is dead code
+
+The watch app's `VibrationForegroundService` was designed to keep vibration
+running in the background (screen off, activity hidden behind watch face).
+In practice, vibration **never** runs in the background because:
+
+1. `MainActivity.onUserLeaveHint()` triggers `ACTION_EMERGENCY_STOP` whenever
+the activity is dismissed, immediately cancelling vibration.
+2. `FLAG_KEEP_SCREEN_ON` prevents the screen from timing out while the activity
+is visible, so vibration always has a visible activity.
+3. The only way to dismiss the activity (crown press, swipe) triggers the
+emergency stop path.
+
+**Consequences:**
+- The dual-lease model's background-lease-renewal path is never exercised.
+- The wake lock acquired by the service is never needed (vibration never
+outlives the screen being on).
+- `START_STICKY` auto-restart after process death is never needed (activity
+restart already handles this).
+- `BootReceiver` auto-start is unnecessary (vibration requires user action
+via the phone, so the watch app only needs to be running when the phone is
+active — wake-up via Data Layer already covers this).
+
+The foreground service is **kept intentionally** because it provides
+incidental protection: elevated process priority prevents Android from
+killing the app mid-vibration under memory pressure, and the well-tested
+lease safety net makes the system resilient to edge cases that are hard
+to reproduce in testing. The cost is code complexity (~600 lines), not
+runtime overhead.
 
 ---
 
