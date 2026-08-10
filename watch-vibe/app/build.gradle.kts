@@ -11,8 +11,8 @@ android {
         applicationId = "com.yieldinghartebeest13.watchvibe"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (findProperty("versionCode") as? String)?.toInt() ?: 1
+        versionName = findProperty("versionName") as? String ?: "1.0"
     }
 
     buildTypes {

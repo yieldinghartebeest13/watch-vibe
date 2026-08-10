@@ -41,19 +41,76 @@ jobs:
         with:
           packages: "platforms;android-34 build-tools;34.0.0"
 
+      # ── Validate and compute version ──────────────────
+
+      - name: Validate version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          TYPE: ${{ inputs.type }}
+        run: |
+          # Format: must be MAJOR.MINOR.PATCH
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version must match \d+\.\d+\.\d+ (e.g. 1.0.1)"
+            exit 1
+          fi
+
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          # Find previous tag in the same series
+          PREV_TAG=$(git tag --list "${TYPE}*" --sort=-creatordate | head -1)
+
+          if [ -n "$PREV_TAG" ]; then
+            PREV_VERSION=$(echo "$PREV_TAG" | sed "s/^${TYPE}//")
+
+            if echo "$PREV_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              PREV_MAJOR=$(echo "$PREV_VERSION" | cut -d. -f1)
+              PREV_MINOR=$(echo "$PREV_VERSION" | cut -d. -f2)
+              PREV_PATCH=$(echo "$PREV_VERSION" | cut -d. -f3)
+              PREV_CODE=$((PREV_MAJOR * 10000 + PREV_MINOR * 100 + PREV_PATCH))
+
+              if [ "$VERSION_CODE" -le "$PREV_CODE" ]; then
+                echo "::error::Version $VERSION must be higher than previous ${TYPE} ${PREV_VERSION}"
+                exit 1
+              fi
+
+              if [ "$TYPE" = "beta" ]; then
+                if [ "$MAJOR" != "$PREV_MAJOR" ] || [ "$MINOR" != "$PREV_MINOR" ]; then
+                  echo "::error::Beta can only increment the patch number. Expected ${PREV_MAJOR}.${PREV_MINOR}.X (X > ${PREV_PATCH})"
+                  exit 1
+                fi
+              fi
+            else
+              echo "::warning::Previous tag $PREV_TAG has unexpected format — skipping comparison"
+            fi
+          else
+            echo "No previous ${TYPE} tag found — first release in this series"
+          fi
+
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION  Code: $VERSION_CODE  Series: $TYPE"
+
       # ── Build both APKs ──────────────────────────────
 
       - name: Build WatchVibe (watch)
         working-directory: watch-vibe
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon assembleRelease \
+            -PversionCode=${{ steps.version.outputs.version_code }} \
+            -PversionName=${{ steps.version.outputs.version_name }}
 
       - name: Build WatchVibeControl (phone)
         working-directory: watch-vibe-control
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon assembleRelease \
+            -PversionCode=${{ steps.version.outputs.version_code }} \
+            -PversionName=${{ steps.version.outputs.version_name }}
 
       # ── Sign both APKs ───────────────────────────────
 
