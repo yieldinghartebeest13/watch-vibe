@@ -1,6 +1,7 @@
 package com.yieldinghartebeest13.watchvibe
 
 import android.animation.ObjectAnimator
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
@@ -28,6 +29,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var batteryIcon: ImageView
     private lateinit var batteryText: TextView
     private lateinit var btnStats: ImageView
+    private lateinit var btnSettings: ImageView
+    private var unlockedInSession = false
+    private var lockRequestInProgress = false
     private lateinit var btnStop: Button
     private lateinit var btnMore: Button
     private lateinit var btnLess: Button
@@ -116,6 +120,11 @@ class MainActivity : AppCompatActivity() {
         batteryIcon = findViewById(R.id.batteryIcon)
         batteryText = findViewById(R.id.batteryText)
         btnStats = findViewById(R.id.btnStats)
+        btnSettings = findViewById(R.id.btnSettings)
+        btnSettings.setOnClickListener {
+            viewModel.suppressNextMinimize()
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
         btnStop = findViewById(R.id.btnStop)
         btnMore = findViewById(R.id.btnMore)
         btnLess = findViewById(R.id.btnLess)
@@ -421,6 +430,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (lockRequestInProgress) {
+            unlockedInSession = true
+            lockRequestInProgress = false
+        }
+        if (!unlockedInSession) {
+            val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
+            val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
+            val pinHash = prefs.getString("pin_hash", null)
+            if (stealthEnabled && pinHash != null) {
+                lockRequestInProgress = true
+                startActivity(Intent(this, LockActivity::class.java))
+                return
+            }
+            unlockedInSession = true
+        }
         viewModel.onForeground()
     }
 

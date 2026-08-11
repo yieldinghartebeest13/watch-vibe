@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#a0a0b0">
+
+    <!-- Gear body (ring: outer r=7.5 clockwise, inner r=5 counter-clockwise = hole) -->
+    <path
+        android:fillColor="#a0a0b0"
+        android:pathData="M12,4.5 A7.5,7.5 0 1,1 12,19.5 A7.5,7.5 0 0,1 12,4.5 Z M12,7 A5,5 0 1,0 12,17 A5,5 0 0,0 12,7 Z" />
+
+    <!-- 8 teeth around the ring -->
+    <group android:rotation="0" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="45" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="90" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="135" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="180" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="225" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="270" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+    <group android:rotation="315" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#a0a0b0" android:pathData="M10.5,1.5 L13.5,1.5 L13.5,4.5 L10.5,4.5 Z" />
+    </group>
+
+    <!-- Center axle dot -->
+    <path
+        android:fillColor="#a0a0b0"
+        android:pathData="M12,10 A2,2 0 1,1 10,12 A2,2 0 0,1 12,10 Z" />
+</vector>
