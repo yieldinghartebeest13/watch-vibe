@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
+import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
@@ -106,8 +107,29 @@ class MainActivity : AppCompatActivity() {
             null)
     )
 
+    private var uiReady = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Check stealth before rendering any UI (prevents flash + recents leak)
+        val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("stealth_enabled", false)) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            val pinHash = prefs.getString("pin_hash", null)
+            if (pinHash != null) {
+                lockRequestInProgress = true
+                startActivity(Intent(this, LockActivity::class.java))
+                return  // UI setup deferred to onResume after unlock
+            }
+        }
+
+        setupUi()
+    }
+
+    private fun setupUi() {
+        if (uiReady) return
+        uiReady = true
         setContentView(R.layout.activity_main)
 
         viewModel = androidx.lifecycle.ViewModelProvider(
@@ -433,13 +455,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (lockRequestInProgress) {
+        if (!uiReady) setupUi()
+
+        // Keep FLAG_SECURE in sync with stealth setting
+        val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
+        val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
+        if (stealthEnabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+
+        val wasLocking = lockRequestInProgress
+        lockRequestInProgress = false
+        if (wasLocking) {
             unlockedInSession = true
-            lockRequestInProgress = false
         }
         if (!unlockedInSession && !skipNextLock) {
-            val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
-            val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
             val pinHash = prefs.getString("pin_hash", null)
             if (stealthEnabled && pinHash != null && !viewModel.isVibrating.value) {
                 lockRequestInProgress = true
@@ -459,7 +491,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (!lockRequestInProgress && !skipNextLock) {
+        if (!skipNextLock) {
             unlockedInSession = false
         }
     }
