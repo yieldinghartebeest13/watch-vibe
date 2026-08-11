@@ -47,14 +47,24 @@ class SettingsActivity : AppCompatActivity() {
         // Listeners
         stealthSwitch.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("stealth_enabled", isChecked).apply()
-            toggleAlias(isChecked)
             updatePinSection()
             if (isChecked && prefs.getString("pin_hash", null) == null) {
                 showPinDialog()
+            } else {
+                // Pin already set — safe to apply alias change immediately
+                toggleAlias(isChecked)
             }
         }
 
         setPinButton.setOnClickListener { showPinDialog() }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Apply any pending alias change (covers the case where pin was
+        // set after stealth was enabled and alias hasn't been toggled yet)
+        val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
+        toggleAlias(stealthEnabled)
     }
 
     private fun toggleAlias(enabled: Boolean) {

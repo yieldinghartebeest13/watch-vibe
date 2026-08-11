@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettings: ImageView
     private var unlockedInSession = false
     private var lockRequestInProgress = false
+    private var skipNextLock = false
     private lateinit var btnStop: Button
     private lateinit var btnMore: Button
     private lateinit var btnLess: Button
@@ -123,6 +124,7 @@ class MainActivity : AppCompatActivity() {
         btnSettings = findViewById(R.id.btnSettings)
         btnSettings.setOnClickListener {
             viewModel.suppressNextMinimize()
+            skipNextLock = true
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         btnStop = findViewById(R.id.btnStop)
@@ -161,6 +163,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupListeners() {
         btnStats.setOnClickListener {
             viewModel.suppressNextMinimize()
+            skipNextLock = true
             startActivity(android.content.Intent(this, StatsActivity::class.java))
         }
         for (cfg in tileConfigs) {
@@ -434,23 +437,31 @@ class MainActivity : AppCompatActivity() {
             unlockedInSession = true
             lockRequestInProgress = false
         }
-        if (!unlockedInSession) {
+        if (!unlockedInSession && !skipNextLock) {
             val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
             val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
             val pinHash = prefs.getString("pin_hash", null)
-            if (stealthEnabled && pinHash != null) {
+            if (stealthEnabled && pinHash != null && !viewModel.isVibrating.value) {
                 lockRequestInProgress = true
                 startActivity(Intent(this, LockActivity::class.java))
                 return
             }
             unlockedInSession = true
         }
+        skipNextLock = false
         viewModel.onForeground()
     }
 
     override fun onPause() {
         super.onPause()
         viewModel.onBackground()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!lockRequestInProgress && !skipNextLock) {
+            unlockedInSession = false
+        }
     }
 
     override fun onDestroy() {

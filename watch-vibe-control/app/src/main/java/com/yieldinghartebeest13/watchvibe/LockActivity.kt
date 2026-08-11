@@ -9,88 +9,131 @@ import java.security.MessageDigest
 
 class LockActivity : Activity() {
 
-    private lateinit var pinBuilder: StringBuilder
-    private lateinit var pinDots: List<View>
-    private lateinit var errorText: TextView
+    private lateinit var display: TextView
     private lateinit var prefs: SharedPreferences
+
+    // Calculator state
+    private var currentInput = "0"
+    private var firstOperand = 0L
+    private var pendingOp: Char = ' '
+    private var clearOnNextDigit = false
+
+    // PIN tracking: last N digits pressed
+    private val digitRing = StringBuilder()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_lock)
 
         prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
-        pinBuilder = StringBuilder()
-        errorText = findViewById(R.id.lockErrorText)
+        display = findViewById(R.id.calcDisplay)
 
-        pinDots = listOf(
-            findViewById(R.id.pinDot1),
-            findViewById(R.id.pinDot2),
-            findViewById(R.id.pinDot3),
-            findViewById(R.id.pinDot4)
+        // Digit buttons
+        val digits = mapOf(
+            R.id.key0 to '0', R.id.key1 to '1', R.id.key2 to '2',
+            R.id.key3 to '3', R.id.key4 to '4', R.id.key5 to '5',
+            R.id.key6 to '6', R.id.key7 to '7', R.id.key8 to '8',
+            R.id.key9 to '9'
         )
-
-        // Bind digit buttons (1-9, 0)
-        val digitButtons = mapOf(
-            R.id.keypad1 to "1", R.id.keypad2 to "2", R.id.keypad3 to "3",
-            R.id.keypad4 to "4", R.id.keypad5 to "5", R.id.keypad6 to "6",
-            R.id.keypad7 to "7", R.id.keypad8 to "8", R.id.keypad9 to "9",
-            R.id.keypad0 to "0"
-        )
-        for ((id, digit) in digitButtons) {
-            findViewById<View>(id).setOnClickListener {
-                onDigitPressed(digit)
-            }
+        for ((id, digit) in digits) {
+            findViewById<View>(id).setOnClickListener { onDigit(digit) }
         }
 
-        findViewById<View>(R.id.keypadDelete).setOnClickListener {
-            onDeletePressed()
+        // Operations
+        findViewById<View>(R.id.keyAdd).setOnClickListener { onOp('+') }
+        findViewById<View>(R.id.keySub).setOnClickListener { onOp('-') }
+        findViewById<View>(R.id.keyMul).setOnClickListener { onOp('*') }
+        findViewById<View>(R.id.keyDiv).setOnClickListener { onOp('/') }
+
+        // Equals
+        findViewById<View>(R.id.keyEq).setOnClickListener { onEquals() }
+
+        // Clear
+        findViewById<View>(R.id.keyClear).setOnClickListener { onClear() }
+    }
+
+    // ── Calculator logic ──────────────────────────────────
+
+    private fun updateDisplay() {
+        display.text = currentInput
+    }
+
+    private fun onDigit(digit: Char) {
+        // Track digit for PIN unlock
+        digitRing.append(digit)
+        if (digitRing.length > 4) digitRing.delete(0, digitRing.length - 4)
+        checkPin()
+
+        if (clearOnNextDigit) {
+            currentInput = "0"
+            clearOnNextDigit = false
+        }
+        if (currentInput == "0") {
+            currentInput = digit.toString()
+        } else {
+            currentInput += digit
+        }
+        updateDisplay()
+    }
+
+    private fun onOp(op: Char) {
+        // Also check pin on operation press
+        checkPin()
+
+        val value = currentInput.toLongOrNull() ?: 0
+        if (pendingOp != ' ') {
+            firstOperand = compute(firstOperand, value, pendingOp)
+        } else {
+            firstOperand = value
+        }
+        pendingOp = op
+        clearOnNextDigit = true
+        currentInput = firstOperand.toString()
+        updateDisplay()
+    }
+
+    private fun onEquals() {
+        checkPin()
+
+        val value = currentInput.toLongOrNull() ?: 0
+        if (pendingOp != ' ') {
+            val result = compute(firstOperand, value, pendingOp)
+            currentInput = result.toString()
+            firstOperand = 0
+            pendingOp = ' '
+        }
+        clearOnNextDigit = true
+        updateDisplay()
+    }
+
+    private fun onClear() {
+        currentInput = "0"
+        firstOperand = 0
+        pendingOp = ' '
+        clearOnNextDigit = false
+        updateDisplay()
+    }
+
+    private fun compute(a: Long, b: Long, op: Char): Long {
+        return when (op) {
+            '+' -> a + b
+            '-' -> a - b
+            '*' -> a * b
+            '/' -> if (b != 0L) a / b else 0
+            else -> b
         }
     }
 
-    private fun onDigitPressed(digit: String) {
-        if (pinBuilder.length >= 4) return
-        errorText.visibility = View.GONE
-        pinBuilder.append(digit)
-        updateDots()
-        if (pinBuilder.length == 4) {
-            verifyPin()
-        }
-    }
+    // ── PIN unlock ────────────────────────────────────────
 
-    private fun onDeletePressed() {
-        if (pinBuilder.isNotEmpty()) {
-            pinBuilder.deleteCharAt(pinBuilder.length - 1)
-            updateDots()
-        }
-    }
-
-    private fun verifyPin() {
-        val enteredPin = pinBuilder.toString()
-        val storedHash = prefs.getString("pin_hash", null)
-        if (storedHash == null) {
-            // No PIN set — allow entry
-            finish()
-            return
-        }
+    private fun checkPin() {
+        if (digitRing.length != 4) return
+        val storedHash = prefs.getString("pin_hash", null) ?: return
         val digest = MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(enteredPin.toByteArray())
+        val hash = digest.digest(digitRing.toString().toByteArray())
             .joinToString("") { "%02x".format(it) }
         if (hash == storedHash) {
             finish()
-        } else {
-            errorText.visibility = View.VISIBLE
-            pinBuilder.clear()
-            updateDots()
-        }
-    }
-
-    private fun updateDots() {
-        for (i in 0 until 4) {
-            if (i < pinBuilder.length) {
-                pinDots[i].setBackgroundResource(R.drawable.pin_dot_filled)
-            } else {
-                pinDots[i].setBackgroundResource(R.drawable.pin_dot_empty)
-            }
         }
     }
 
