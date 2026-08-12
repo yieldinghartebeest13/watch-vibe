@@ -10,34 +10,34 @@ Two companion apps that control a watch's vibration motor from your phone.
 ┌──────────────────────────────────────────┐     ┌────────────────────────────────────┐
 │  Phone App (WatchVibeControl)            │     │  Wear OS App (WatchVibe)           │
 │  ┌────────────────────────────────────┐  │     │  ┌──────────────────────────────┐  │
-│  │ MainActivity                       │  │     │  │ VibrationForegroundService   │  │
+│  │ MainActivity                       │  │     │  │ MainActivity (KIOSK MODE)    │  │
 │  │  6 tiles (3×2 grid)                │  │     │  │  ★ VibratorEngine (amplitude) │  │
 │  │  WaveformView per tile             │  │     │  │  ★ Data/Message/Cap listeners │  │
 │  │  Speed +/- (60dp)                  │  │     │  │  ★ Lease monitor (3s renew)   │  │
 │  │  STOP (red when active)            │  │     │  │  ★ Dead-man's switch          │  │
-│  │  Active tile: rotating dots        │  │     │  │  ★ WAKE_LOCK + notification    │  │
-│  │  + waveform-tracing pulse          │  │     │  │  ★ Status from lease (unified) │  │
-│  └──────────┬─────────────────────────┘  │     │  └──────────────┬───────────────┘  │
-│             │                            │     │                 │ broadcasts       │
-│  ┌──────────▼─────────────────────────┐  │     │  ┌──────────────▼───────────────┐  │
-│  │ MainViewModel                      │  │     │  │ MainActivity (KIOSK MODE)    │  │
-│  │  mode, level (SavedStateHandle)    │  │     │  │  Mode name as primary status  │  │
-│  │  Heartbeat (mode-aware, bg-safe)   │  │     │  │  Speed label below            │  │
-│  │  CapabilityClient.addListener      │  │     │  │  All touch/back blocked       │  │
+│  │  Active tile: rotating dots        │  │     │  │  ★ Battery monitor            │  │
+│  │  + waveform-tracing pulse          │  │     │  │  All touch/back blocked       │  │
 │  └──────────┬─────────────────────────┘  │     │  │  onUserLeaveHint → emergency   │  │
-│             │                            │     │  └──────────────────────────────┘  │
+│             │                            │     │  │  No foreground service         │  │
+│  ┌──────────▼─────────────────────────┐  │     │  └──────────────────────────────┘  │
+│  │ MainViewModel                      │  │     │                                    │
+│  │  mode, level (SavedStateHandle)    │  │     │  ┌──────────────────────────────┐  │
+│  │  Heartbeat (mode-aware, bg-safe)   │  │     │  │ VibrationDataLayerService    │  │
+│  │  CapabilityClient.addListener      │  │     │  │  Wake-up only → launches Act. │  │
+│  └──────────┬─────────────────────────┘  │     │  └──────────────────────────────┘  │
+│             │                            │     │                                    │
 │  ┌──────────▼─────────────────────────┐  │     │                                    │
-│  │ WearDataLayer                      │  │     │  ┌──────────────────────────────┐  │
-│  │  DataClient + MessageClient        │  │     │  │ VibrationDataLayerService    │  │
-│  │  CapabilityClient (watch det.)     │  │     │  │  Wake-up only → starts FGS   │  │
-│  │  ★ Incoming message listener       │  │     │  │  ★ Battery monitor + broadcast │  │
-  │  ★ Battery request on connect       │  │     │  └──────────────────────────────┘  │
-│  └────────────────────────────────────┘  │     │  └──────────────────────────────┘  │
-└──────────────────────────────────────────┘     │  ┌──────────────────────────────┐  │
-                  │                              │  │ BootReceiver                 │  │
-         Bluetooth/WiFi                           │  │  Auto-start on reboot        │  │
-         Wear OS Data Layer                       │  └──────────────────────────────┘  │
-         paths: /control, /ping,                    └────────────────────────────────────┘
+│  │ WearDataLayer                      │  │     │                                    │
+│  │  DataClient + MessageClient        │  │     │                                    │
+│  │  CapabilityClient (watch det.)     │  │     │                                    │
+│  │  ★ Incoming message listener       │  │     │                                    │
+│  │  ★ Battery request on connect       │  │     │                                    │
+│  └────────────────────────────────────┘  │     │                                    │
+└──────────────────────────────────────────┘     └────────────────────────────────────┘
+                  │
+         Bluetooth/WiFi
+         Wear OS Data Layer
+         paths: /control, /ping,
                 /launch, /minimize
          ← /crown_exit (watch→phone)
          → /battery_request (phone→watch)
@@ -166,10 +166,11 @@ to save battery.
 
 ### 9. Auto-start on watch
 
-Three layers:
-- **BootReceiver**: starts foreground service after reboot
-- **VibrationDataLayerService**: Play Services wakes app on any incoming data → starts FGS
+Two layers:
+- **VibrationDataLayerService**: Play Services wakes app on `/launch` or `/control` → starts MainActivity
 - **Phone sends `/launch`** on open → triggers wake-up
+
+No boot receiver or foreground service — vibration only runs while MainActivity is visible.
 
 ### 10. Auto-minimize on background
 
@@ -209,17 +210,15 @@ called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
 
 **What happens:**
 1. User dismisses watch Activity → `onUserLeaveHint()`
-2. `ACTION_EMERGENCY_STOP` sent to `VibrationForegroundService`
-3. Service cancels vibration, zeroes **both** leases, sets `phoneConnected = false`,
-   broadcasts status
-4. Service sends `/crown_exit` message to phone via `MessageClient`
-5. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
-6. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
+2. Activity cancels vibration directly, zeroes **both** leases, sets `phoneConnected = false`
+3. Activity sends `/crown_exit` message to phone via `MessageClient`
+4. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
+5. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
    connection monitor, and ping foreground service
-7. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
+6. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
    (minimizes the phone app)
-8. When the phone app is reopened, `onForeground()` sends `/launch` →
-   watch wakes up and shows UI again
+7. When the phone app is reopened, `onForeground()` sends `/launch` →
+   watch wakes up and shows UI again (via VibrationDataLayerService)
 
 **Phone message listener:**
 `WearDataLayer` registers a `MessageClient.OnMessageReceivedListener` that
@@ -227,7 +226,7 @@ watches for `/crown_exit` messages from the watch. Started in
 `MainViewModel.startConnectionMonitor()`, stopped in `stopConnectionMonitor()`.
 
 **`moveTaskToBack(true)` re-entrancy (fixed):**
-When the phone sends `/minimize`, the watch's `StatusReceiver` calls
+When the phone sends `/minimize`, the watch's `MinimizeReceiver` calls
 `moveTaskToBack(true)`, which itself triggers `onUserLeaveHint()`. A
 `minimizeInProgress` guard flag suppresses the redundant emergency stop.
 Without it this would fire a wasteful `/crown_exit` round-trip to an
@@ -283,35 +282,22 @@ on a dedicated stats screen.
 - Uses `suppressMinimize` flag to prevent watch dismissal when opening
   the stats screen (internal activity transition)
 
-### 14. Foreground service background capability is dead code
+### 14. No foreground service — vibration is activity-scoped
 
-The watch app's `VibrationForegroundService` was designed to keep vibration
-running in the background (screen off, activity hidden behind watch face).
-In practice, vibration **never** runs in the background because:
+`VibrationForegroundService` has been removed. All vibration control,
+listeners, lease management, and battery monitoring now live directly in
+`MainActivity`. Vibration only runs while the activity is visible.
 
-1. `MainActivity.onUserLeaveHint()` triggers `ACTION_EMERGENCY_STOP` whenever
-the activity is dismissed, immediately cancelling vibration.
-2. `FLAG_KEEP_SCREEN_ON` prevents the screen from timing out while the activity
-is visible, so vibration always has a visible activity.
+**Rationale:**
+1. `MainActivity.onUserLeaveHint()` triggers emergency stop whenever the
+activity is dismissed, immediately cancelling vibration.
+2. `FLAG_KEEP_SCREEN_ON` prevents the screen from timing out while the
+activity is visible.
 3. The only way to dismiss the activity (crown press, swipe) triggers the
-emergency stop path.
-
-**Consequences:**
-- The dual-lease model's background-lease-renewal path is never exercised.
-- The wake lock acquired by the service is never needed (vibration never
-outlives the screen being on).
-- `START_STICKY` auto-restart after process death is never needed (activity
-restart already handles this).
-- `BootReceiver` auto-start is unnecessary (vibration requires user action
-via the phone, so the watch app only needs to be running when the phone is
-active — wake-up via Data Layer already covers this).
-
-The foreground service is **kept intentionally** because it provides
-incidental protection: elevated process priority prevents Android from
-killing the app mid-vibration under memory pressure, and the well-tested
-lease safety net makes the system resilient to edge cases that are hard
-to reproduce in testing. The cost is code complexity (~600 lines), not
-runtime overhead.
+emergency stop path — vibration can never run unattended.
+4. Eliminating the foreground service removes ~600 lines and simplifies
+the architecture: there is exactly one place where vibration can start,
+and exactly one place where it must stop.
 
 ---
 
@@ -408,8 +394,7 @@ the keyguard via `setShowWhenLocked(true)`.
 | Session ID | Resets counter baseline, suppresses cross-session auto-resume | Generated each app launch |
 | State persistence | SavedStateHandle restores mode/level after process death | singleTask launch mode |
 | Background heartbeat | Mode-aware: runs in background only when vibration active | onBackground() checks mode |
-| Wake-up | DataListenerService starts FGS | Phone sends /launch on open |
-| Boot | BootReceiver starts FGS | — |
+| Wake-up | DataLayerService launches Activity | Phone sends /launch on open |
 | Auto-minimize | Lease-expiry (30s delay) + phone-background (immediate) when idle | Phone sends /minimize on background |
 | Emergency stop | Watch sends /crown_exit on dismiss; phone minimizes | Phone listens for /crown_exit, resets UI |
 | Battery monitor | Push: sync read + broadcast on change; Pull: phone requests on connect | Phone displays battery icon + percentage |
@@ -445,14 +430,12 @@ app/src/main/
 
 ```
 app/src/main/
-├── AndroidManifest.xml       # VIBRATE + WAKE_LOCK + FOREGROUND_*
+├── AndroidManifest.xml       # VIBRATE only
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
-│   ├── VibrationForegroundService.kt # Listeners + lease monitor + dead-man's switch + battery monitor
-│   ├── VibrationDataLayerService.kt  # Wake-up only (static flag check)
-│   ├── BootReceiver.kt               # Auto-start on reboot
-│   └── MainActivity.kt               # Kiosk mode display
+│   ├── VibrationDataLayerService.kt  # Wake-up only → launches MainActivity
+│   └── MainActivity.kt               # Kiosk mode + listeners + lease monitor + battery
 └── res/
     ├── layout/activity_main.xml
     └── drawable/ic_vibration.xml
@@ -493,7 +476,5 @@ make debug-phone-all
 | Tag | App | Component |
 |-----|-----|-----------|
 | `VibeWearDL` | Phone | WearDataLayer |
-| `VibeSvc` | Watch | VibrationForegroundService |
-| `VibeAct` | Watch | MainActivity |
+| `VibeAct` | Watch | MainActivity (all vibration control) |
 | `VibeWake` | Watch | VibrationDataLayerService |
-| `VibeBoot` | Watch | BootReceiver |
