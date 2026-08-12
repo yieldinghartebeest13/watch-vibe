@@ -42,6 +42,7 @@ Two companion apps that control a watch's vibration motor from your phone.
          ← /crown_exit (watch→phone)
          → /battery_request (phone→watch)
          ← /battery (watch→phone)
+         ← /alive (watch→phone, periodic)
          keys: wear_mode, wear_level,
                 wear_intensity, battery_level
 ```
@@ -299,6 +300,53 @@ emergency stop path — vibration can never run unattended.
 the architecture: there is exactly one place where vibration can start,
 and exactly one place where it must stop.
 
+### 15. Reversed heartbeat — /alive (watch → phone)
+
+The watch sends an `/alive` message to the phone every 2 seconds while
+`MainActivity` is visible and running. The phone tracks the timestamp of
+the last received `/alive` and considers the watch "connected" only if
+a signal arrived within the last 5 seconds (`ALIVE_TIMEOUT_MS`).
+
+A periodic checker in `MainViewModel.startConnectionMonitor()` flips
+`watchConnected` to `false` if no `/alive` arrives within the timeout.
+
+This is reliable across all scenarios:
+- **First launch**: watch starts sending → phone sees it within 2s
+- **Minimize/reopen**: watch keeps sending while visible → phone
+  immediately knows when user returns
+- **Watch dismissed**: watch stops sending → phone detects within 5s
+- **Connection drop**: signals stop arriving → phone detects within 5s
+
+The `CapabilityClient` listener is still used for **fast disconnect
+detection** — when the phone node disappears from the capability set,
+`watchConnected` flips to `false` immediately (sub-second), faster than
+the 5-second alive timeout.
+
+### 16. Wake-up command forwarding
+
+`VibrationDataLayerService` now extracts control command data (mode, level,
+intensity, timestamp) from incoming `/control` DataItems and Messages and
+passes them as Intent extras to `MainActivity`. This prevents command loss
+during the launch window: if the user taps a mode tile while the watch
+app is still starting, the command is forwarded and applied immediately
+in `onCreate()` instead of being silently dropped.
+
+Additionally, when the phone receives the first `/alive` after being
+disconnected, it re-sends the active vibration command — recovering from
+any race where the initial command was lost before the watch was ready.
+
+### 17. Stealth-mode lock guard
+
+When the phone app is disguised (stealth mode with PIN), `MainActivity`
+launches `LockActivity` from `onResume()`. Without a guard, the subsequent
+`onPause()` would call `viewModel.onBackground()`, which sends a spurious
+`/minimize` to the watch and performs unnecessary background cleanup —
+all before the user has even unlocked.
+
+`onPause()` now checks `lockRequestInProgress` and skips `onBackground()`
+when transitioning to the lock screen. `onForeground()` is called only
+after the user unlocks, starting the connection once.
+
 ---
 
 ## Vibration Modes (6 total)
@@ -385,8 +433,10 @@ the keyguard via `setShowWhenLocked(true)`.
 
 | Layer | Watch | Phone |
 |-------|-------|-------|
-| CapabilityClient listener | Detects phone presence → immediate cancel | Detects watch capability |
+| CapabilityClient listener | Detects phone presence → immediate cancel | Detects watch capability (fast disconnect only) |
+| Reversed heartbeat `/alive` | Watch → phone every 2s while Activity visible | Gates `watchConnected` (true when /alive within 5s) |
 | Heartbeat ping (dual) | Phone → watch every 1s via DataClient + MessageClient | Phone sends |
+| Command recovery | Intent extras forwarded by VibrationDataLayerService | Re-sends active command on first /alive after connect |
 | Connection lease expiry (safety net) | 3s after last ping → both leases zeroed, cancel | N/A |
 | Vibration lease | Extended by pings; zeroed by STOP; drives auto-resume | — |
 | UI connection status | Derived from connectionLease (`connectionLeaseExpiry > now`) | — |
@@ -466,7 +516,7 @@ make clear-phone
 
 ### Debug
 ```bash
-make debug-wear       # VibeSvc|VibeAct|VibeWake
+make debug-wear       # VibeAct|VibeWake
 make debug-phone      # VibeWearDL
 make debug-wear-all   # All buffers, broad filter
 make debug-phone-all

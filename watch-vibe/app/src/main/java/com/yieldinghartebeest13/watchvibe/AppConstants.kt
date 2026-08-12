@@ -29,6 +29,7 @@ object AppConstants {
     const val PATH_CROWN_EXIT = "/crown_exit"
     const val PATH_BATTERY = "/battery"
     const val PATH_BATTERY_REQUEST = "/battery_request"
+    const val PATH_ALIVE = "/alive"
 
     // ── Wear Data Layer keys ───────────────────────────────
     const val KEY_MODE = "wear_mode"
@@ -42,6 +43,12 @@ object AppConstants {
     // ── Heartbeat ──────────────────────────────────────────
     const val HEARTBEAT_INTERVAL_MS = 1_000L
     const val HEARTBEAT_TIMEOUT_MS = 2_000L
+
+    // ── Reversed heartbeat (watch → phone) ───────────────
+    // Watch sends /alive every ALIVE_INTERVAL_MS. Phone shows
+    // disconnected if no /alive received within ALIVE_TIMEOUT_MS.
+    const val ALIVE_INTERVAL_MS = 2_000L
+    const val ALIVE_TIMEOUT_MS = 5_000L
 
     // ── Safety lease ───────────────────────────────────────
     // Vibration runs on a renewable lease: each ping extends

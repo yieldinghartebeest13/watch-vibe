@@ -106,10 +106,22 @@ class MainActivity : Activity() {
             Log.w(TAG, "No vibrator — activity will run but won't vibrate")
         }
 
+        // Apply any control command forwarded by VibrationDataLayerService
+        applyWakeExtras(intent)
+
         startListeners()
         startHeartbeatMonitor()
         startBatteryMonitor()
+        sendAliveToPhone()
         Log.d(TAG, "onCreate done")
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        Log.d(TAG, "onNewIntent")
+        if (intent != null) {
+            applyWakeExtras(intent)
+        }
     }
 
     override fun onStart() {
@@ -124,6 +136,8 @@ class MainActivity : Activity() {
         }
         // Push current status to the display immediately
         updateDisplay()
+        // Send immediate /alive so the phone knows we're here on resume
+        sendAliveToPhone()
     }
 
     override fun onStop() {
@@ -171,6 +185,31 @@ class MainActivity : Activity() {
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = true
     override fun onTouchEvent(event: MotionEvent?): Boolean = true
     override fun onBackPressed() { Log.d(TAG, "Back blocked") }
+
+    /**
+     * Apply a control command forwarded by VibrationDataLayerService via Intent extras.
+     * Prevents command loss during the launch window (command sent while
+     * MainActivity was still starting).
+     */
+    private fun applyWakeExtras(intent: Intent?) {
+        if (intent == null) return
+        if (!intent.hasExtra(VibrationDataLayerService.EXTRA_MODE)) return
+
+        val mode = intent.getIntExtra(VibrationDataLayerService.EXTRA_MODE, AppConstants.MODE_PAUSE)
+        val level = intent.getIntExtra(VibrationDataLayerService.EXTRA_LEVEL, 0)
+        val intensity = intent.getIntExtra(VibrationDataLayerService.EXTRA_INTENSITY, 100)
+        val ts = intent.getLongExtra(VibrationDataLayerService.EXTRA_TIMESTAMP, 0L)
+
+        if (isStaleCommand(ts)) {
+            Log.d(TAG, "Ignoring stale wake-up command: mode=$mode")
+            return
+        }
+
+        Log.d(TAG, "Applying wake-up command: mode=$mode level=$level intensity=$intensity")
+        lastCommandTimestamp = ts
+        vibratorEngine.setModeVibration(mode, level, intensity)
+        renewLeaseIfActive(mode)
+    }
 
     // ═══════════════════════════════════════════════════════
     // Display
@@ -356,6 +395,7 @@ class MainActivity : Activity() {
 
             if (phoneConnected) {
                 extendLease()
+                sendAliveToPhone()
                 if (lastBatteryLevel >= 0) {
                     sendBatteryToPhone(lastBatteryLevel)
                 }
@@ -387,11 +427,18 @@ class MainActivity : Activity() {
 
     private fun startHeartbeatMonitor() {
         heartbeatChecker = activityScope.launch {
-            delay(2000)
-            Log.d(TAG, "Lease monitor started (lease=${AppConstants.VIBRATION_LEASE_MS}ms)")
+            Log.d(TAG, "Lease monitor + alive heartbeat started")
+            var tick = 0L
             while (isActive) {
                 delay(1000)
+                tick++
                 val now = System.currentTimeMillis()
+
+                // Send /alive to phone every 2s so it knows we're still here.
+                if (tick % 2 == 0L) {
+                    sendAliveToPhone()
+                }
+
                 if (connectionLeaseExpiry > 0 && now > connectionLeaseExpiry) {
                     Log.w(TAG, "Connection LEASE EXPIRED → cancelling everything")
                     connectionLeaseExpiry = 0
@@ -518,6 +565,26 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "Battery send failed: ${e.message}")
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Alive heartbeat (watch → phone)
+    // ═══════════════════════════════════════════════════════
+
+    /** Periodic signal that proves this activity is alive and ready for commands. */
+    private fun sendAliveToPhone() {
+        activityScope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@MainActivity)
+                    .connectedNodes.await()
+                for (node in nodes) {
+                    Wearable.getMessageClient(this@MainActivity)
+                        .sendMessage(node.id, AppConstants.PATH_ALIVE, ByteArray(0)).await()
+                }
+            } catch (_: Exception) {
+                // Silent — retry on next tick
             }
         }
     }

@@ -112,14 +112,15 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Check stealth before rendering any UI (prevents flash + recents leak)
+        // Stealth check — apply FLAG_SECURE early to prevent recents leak,
+        // but don't launch LockActivity here. Defer to onResume() to avoid
+        // a race where onResume fires before LockActivity is visible,
+        // consuming the lock-request flag prematurely and causing a double lock.
         val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
         if (prefs.getBoolean("stealth_enabled", false)) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             val pinHash = prefs.getString("pin_hash", null)
             if (pinHash != null) {
-                lockRequestInProgress = true
-                startActivity(Intent(this, LockActivity::class.java))
                 return  // UI setup deferred to onResume after unlock
             }
         }
@@ -486,7 +487,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        viewModel.onBackground()
+        // Don't call onBackground() when transitioning to the lock screen —
+        // the connection hasn't started yet and we don't want to send
+        // a spurious /minimize to the watch before the user has even unlocked.
+        if (!lockRequestInProgress) {
+            viewModel.onBackground()
+        }
     }
 
     override fun onStop() {

@@ -145,6 +145,10 @@ class WearDataLayer(context: Context) {
 
     // ── Incoming message listener (watch → phone) ──────────
 
+    /** Timestamp (ms) of the last /alive message from the watch. */
+    @Volatile var lastWatchAliveMs: Long = 0
+        private set
+
     /**
      * Request the watch to send its current battery level.
      * The reply arrives via the [startMessageListener] battery callback.
@@ -171,7 +175,11 @@ class WearDataLayer(context: Context) {
      * Start listening for messages from the watch.
      * Handles [AppConstants.PATH_CROWN_EXIT] and [AppConstants.PATH_BATTERY].
      */
-    fun startMessageListener(onCrownExit: () -> Unit, onBatteryUpdate: (Int) -> Unit = {}) {
+    fun startMessageListener(
+        onCrownExit: () -> Unit,
+        onBatteryUpdate: (Int) -> Unit = {},
+        onWatchAlive: () -> Unit = {}
+    ) {
         val listener = MessageClient.OnMessageReceivedListener { event ->
             when (event.path) {
                 AppConstants.PATH_CROWN_EXIT -> {
@@ -183,6 +191,10 @@ class WearDataLayer(context: Context) {
                     Log.d(TAG, "Battery update from watch: $level%")
                     if (level in 0..100) onBatteryUpdate(level)
                 }
+                AppConstants.PATH_ALIVE -> {
+                    lastWatchAliveMs = System.currentTimeMillis()
+                    onWatchAlive()
+                }
                 else -> {
                     Log.d(TAG, "Unknown incoming message: ${event.path}")
                 }
@@ -193,7 +205,14 @@ class WearDataLayer(context: Context) {
         Log.d(TAG, "Message listener registered (incoming)")
     }
 
-    /** Stop listening for messages from the watch. */
+    /**
+     * Whether the watch has sent a recent /alive signal.
+     * Returns true if last /alive was within ALIVE_TIMEOUT_MS.
+     */
+    fun isWatchAlive(): Boolean {
+        val last = lastWatchAliveMs
+        return last > 0 && System.currentTimeMillis() - last < AppConstants.ALIVE_TIMEOUT_MS
+    }
     fun stopMessageListener() {
         messageListener?.let {
             messageClient.removeListener(it)

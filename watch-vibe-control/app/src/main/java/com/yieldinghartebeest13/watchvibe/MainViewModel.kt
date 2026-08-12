@@ -96,6 +96,7 @@ class MainViewModel(
     private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
     private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
+    private var aliveChecker: Job? = null
     private var isInForeground: Boolean = false
     private var suppressMinimize: Boolean = false
 
@@ -150,33 +151,64 @@ class MainViewModel(
         if (capabilityListenerRegistered) return
         capabilityListenerRegistered = true
 
-        // Initial check + wake-up
+        // Initial check — only used for wake-up. Don't set watchConnected yet;
+        // the watch must explicitly signal readiness via /alive.
         viewModelScope.launch {
-            val connected = wearDataLayer.isWearConnected()
-            _watchConnected.value = connected
-            if (connected) {
+            val hasNode = wearDataLayer.isWearConnected()
+            if (hasNode) {
                 wearDataLayer.sendWakeUp()
             }
         }
 
-        // Listener for crown exit from watch (emergency stop) and battery updates
+        // Listener for crown exit, battery updates, and alive heartbeat from watch
         wearDataLayer.startMessageListener(
             onCrownExit = { onCrownExit() },
             onBatteryUpdate = { level ->
                 _watchBatteryLevel.value = level
                 _watchBatteryPending.value = false
+            },
+            onWatchAlive = {
+                val wasDisconnected = !_watchConnected.value
+                if (wasDisconnected) {
+                    _watchConnected.value = true
+                    // Watch just came online — re-send the current command.
+                    // This recovers from the race where a mode was tapped
+                    // before the watch was fully launched and ready.
+                    if (_isVibrating.value) {
+                        viewModelScope.launch {
+                            wearDataLayer.sendControl(_mode.value, _level.value, 100)
+                        }
+                    }
+                }
             }
         )
+
+        // Periodic check: if the watch stops sending /alive, show disconnected.
+        // This handles the case where the watch activity was dismissed or
+        // the connection dropped silently (capability listener may not fire).
+        aliveChecker?.cancel()
+        aliveChecker = viewModelScope.launch {
+            while (isActive) {
+                delay(2000)
+                if (_watchConnected.value && !wearDataLayer.isWatchAlive()) {
+                    _watchConnected.value = false
+                    _watchBatteryPending.value = true
+                }
+            }
+        }
 
         // Actively request current battery level from the watch
         viewModelScope.launch {
             wearDataLayer.requestBattery()
         }
 
-        // Listener for real-time changes
+        // Listener for disconnect detection only — never sets connected=true.
+        // The /ready handshake gates the connected state.
         val listener = CapabilityClient.OnCapabilityChangedListener { capInfo ->
-            val connected = capInfo.nodes.isNotEmpty()
-            _watchConnected.value = connected
+            if (capInfo.nodes.isEmpty()) {
+                _watchConnected.value = false
+                _watchBatteryPending.value = true
+            }
         }
         capabilityListener = listener
 
@@ -191,6 +223,8 @@ class MainViewModel(
     }
 
     fun stopConnectionMonitor() {
+        aliveChecker?.cancel()
+        aliveChecker = null
         val listener = capabilityListener ?: return
         capabilityListener = null
         capabilityListenerRegistered = false
