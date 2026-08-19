@@ -38,6 +38,11 @@ class MainActivity : Activity() {
 
         /** Broadcast action to request this Activity minimize itself. */
         const val ACTION_MINIMIZE = "com.yieldinghartebeest13.watchvibe.MINIMIZE"
+
+        /** Grace period to confirm a leave is a real dismissal before the
+         *  emergency stop. Transient covers (keyguard/charging screen) that
+         *  fire onUserLeaveHint on remote wake are ignored within this window. */
+        private const val EMERGENCY_STOP_GRACE_MS = 2_000L
     }
 
     // ── UI ────────────────────────────────────────────────
@@ -46,6 +51,10 @@ class MainActivity : Activity() {
     private lateinit var levelText: TextView
     private var exitRequested: Boolean = false
     private var minimizeInProgress: Boolean = false
+
+    // ── Emergency-stop confirmation ───────────────────────
+
+    private var emergencyStopJob: Job? = null
 
     // ── Vibration engine ──────────────────────────────────
 
@@ -153,20 +162,51 @@ class MainActivity : Activity() {
         }
         if (!exitRequested) {
             exitRequested = true
-            Log.w(TAG, "User dismissed — EMERGENCY STOP")
+            // Cancel vibration immediately (safety); defer the emergency-stop
+            // cascade until we've confirmed the activity actually left — the
+            // watch OS keyguard can transiently fire onUserLeaveHint on a
+            // remote wake without a real dismissal.
             vibratorEngine.cancel()
-            connectionLeaseExpiry = 0
-            vibrationLeaseExpiry = 0
-            lastCommandTimestamp = 0
-            phoneConnected = false
-            updateDisplay()
-            sendCrownExitToPhone()
+            scheduleEmergencyStop()
         }
+    }
+
+    /** Confirms the leave after the grace period, then fires the emergency stop. */
+    private fun scheduleEmergencyStop() {
+        emergencyStopJob?.cancel()
+        emergencyStopJob = activityScope.launch {
+            delay(EMERGENCY_STOP_GRACE_MS)
+            withContext(Dispatchers.Main) { confirmEmergencyStop() }
+        }
+    }
+
+    private fun confirmEmergencyStop() {
+        if (isFinishing || isDestroyed) return
+        if (hasWindowFocus()) {
+            // Still on screen — transient cover, not a real dismissal.
+            exitRequested = false
+            return
+        }
+        Log.w(TAG, "User dismissed — EMERGENCY STOP")
+        connectionLeaseExpiry = 0
+        vibrationLeaseExpiry = 0
+        lastCommandTimestamp = 0
+        phoneConnected = false
+        updateDisplay()
+        sendCrownExitToPhone()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Activity returned — cancel any pending emergency stop.
+        emergencyStopJob?.cancel()
+        emergencyStopJob = null
     }
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy — cleaning up")
         heartbeatChecker?.cancel()
+        emergencyStopJob?.cancel()
         vibratorEngine.cancel()
         stopListeners()
         stopBatteryMonitor()

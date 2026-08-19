@@ -204,6 +204,12 @@ Fires when the user dismisses the Activity (crown press, swipe away). Works
 identically locked or unlocked — the Activity renders above the keyguard via
 `setShowWhenLocked(true)` + `setTurnScreenOn(true)`.
 
+The watch OS keyguard can *also* transiently fire `onUserLeaveHint()` when the
+watch is woken remotely while its screen is off, without actually dismissing
+the Activity. To avoid a phantom emergency stop, the cascade is deferred by
+`EMERGENCY_STOP_GRACE_MS` (2s) and only runs if the Activity has genuinely
+lost window focus by then.
+
 `exitRequested` flag prevents double-firing and is reset in `onStart()` so
 re-launches (via `SINGLE_TOP`) start with a clean slate. No `finish()` is
 called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
@@ -211,14 +217,18 @@ called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
 
 **What happens:**
 1. User dismisses watch Activity → `onUserLeaveHint()`
-2. Activity cancels vibration directly, zeroes **both** leases, sets `phoneConnected = false`
-3. Activity sends `/crown_exit` message to phone via `MessageClient`
-4. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
-5. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
+2. Activity cancels vibration immediately (safety)
+3. `scheduleEmergencyStop()` waits `EMERGENCY_STOP_GRACE_MS` (2s), then
+   `confirmEmergencyStop()` checks `hasWindowFocus()`:
+   - still focused → transient cover (keyguard), abort and reset `exitRequested`
+   - genuinely dismissed → zeroes **both** leases, sets `phoneConnected = false`
+4. Activity sends `/crown_exit` message to phone via `MessageClient`
+5. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
+6. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
    connection monitor, and ping foreground service
-6. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
+7. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
    (minimizes the phone app)
-7. When the phone app is reopened, `onForeground()` sends `/launch` →
+8. When the phone app is reopened, `onForeground()` sends `/launch` →
    watch wakes up and shows UI again (via VibrationDataLayerService)
 
 **Phone message listener:**
