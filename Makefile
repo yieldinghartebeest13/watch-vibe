@@ -67,6 +67,8 @@ _info  = printf '  → %s\n' '$(1)'
 .PHONY: logs logs-wear logs-phone debug debug-wear debug-phone
 .PHONY: test test-wear test-phone test-e2e
 .PHONY: tap-constant tap-intermittent tap-stop clear-logs send-test
+.PHONY: watch-home cancel-watch-vibration watch-notification-status watch-notification-stop-action
+.PHONY: focus-wear focus-phone test-real-foreground-stop test-real-silent-recovery test-real-notification-stop
 .PHONY: clean info devices release
 
 # ═══════════════════════════════════════════════
@@ -278,15 +280,29 @@ launch: launch-wear launch-phone
 launch-wear: guard-wear
 	@echo "🚀 Launching watch..."
 	@if $(ADB_W) shell am start -n $(WEAR_ACT) >/dev/null 2>&1; then \
-		$(call _ok,watch launched); \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			if $(ADB_W) shell dumpsys activity top 2>/dev/null | grep -q '$(WEAR_PKG)'; then \
+				$(call _ok,watch launched); exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		$(call _fail,watch did not reach foreground); exit 1; \
 	else \
 		$(call _fail,watch launch failed); exit 1; \
 	fi
 
 launch-phone: guard-phone
 	@echo "🚀 Launching phone..."
-	@if $(ADB_P) shell am start -n $(PHONE_ACT) >/dev/null 2>&1; then \
-		$(call _ok,phone launched); \
+	@if $(ADB_P) shell monkey -p $(PHONE_PKG) -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; then \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			if $(ADB_P) shell dumpsys activity top 2>/dev/null | grep -q '$(PHONE_PKG)' || \
+			   $(ADB_P) shell dumpsys activity activities 2>/dev/null | grep -q '$(PHONE_PKG)' || \
+			   $(ADB_P) shell pidof $(PHONE_PKG) >/dev/null 2>&1; then \
+				$(call _ok,phone launch confirmed); exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		$(call _info,phone launch intent sent; foreground confirmation inconclusive); \
 	else \
 		$(call _fail,phone launch failed); exit 1; \
 	fi
@@ -322,11 +338,7 @@ clear-wear: guard-wear stop-wear
 	else \
 		$(call _fail,watch reinstall failed); exit 1; \
 	fi
-	@if $(ADB_W) shell am start -n $(WEAR_ACT) >/dev/null 2>&1; then \
-		$(call _ok,watch launched); \
-	else \
-		$(call _fail,watch launch failed); exit 1; \
-	fi
+	@$(MAKE) --no-print-directory launch-wear
 
 clear-phone: guard-phone stop-phone
 	@echo "🧹 Clearing phone..."
@@ -344,11 +356,7 @@ clear-phone: guard-phone stop-phone
 			$(call _fail,phone reinstall failed); exit 1; \
 		fi; \
 	fi
-	@if $(ADB_P) shell am start -n $(PHONE_ACT) >/dev/null 2>&1; then \
-		$(call _ok,phone launched); \
-	else \
-		$(call _fail,phone launch failed); exit 1; \
-	fi
+	@$(MAKE) --no-print-directory launch-phone
 
 # ═══════════════════════════════════════════════
 # Logs
@@ -447,6 +455,94 @@ tap-intermittent: guard-phone
 tap-stop: guard-phone
 	@echo "👆 Tapping Stop..."
 	@$(ADB_P) shell input tap 504 1627 && $(call _ok,tapped Stop)
+
+watch-home: guard-wear
+	@echo "⌚ Sending HOME to watch..."
+	@if $(ADB_W) shell input keyevent KEYCODE_HOME >/dev/null 2>&1; then \
+		$(call _ok,watch HOME sent); \
+	else \
+		$(call _fail,watch HOME failed); exit 1; \
+	fi
+
+cancel-watch-vibration: guard-wear
+	@echo "🛑 Cancelling watch vibrator via shell service..."
+	@if $(ADB_W) shell cmd vibrator_manager cancel >/dev/null 2>&1; then \
+		$(call _ok,watch vibrator cancelled); \
+	else \
+		$(call _fail,watch vibrator cancel failed); exit 1; \
+	fi
+
+watch-notification-status: guard-wear
+	@echo "🔔 Watch notification status..."
+	@$(ADB_W) shell dumpsys notification --noredact 2>/dev/null | \
+		grep -E '$(WEAR_PKG)|active_vibration_exit_v2|NotificationRecord' | tail -40 || \
+		echo "  (no matching notifications)"
+
+watch-notification-stop-action: guard-wear
+	@echo "🛑 Invoking watch notification STOP action..."
+	@if $(ADB_W) shell am start -n $(WEAR_ACT) \
+		-a com.yieldinghartebeest13.watchvibe.STOP_FROM_NOTIFICATION \
+		--ez stop_from_notification true >/dev/null 2>&1; then \
+		$(call _ok,watch STOP action intent sent); \
+	else \
+		$(call _fail,watch STOP action failed); exit 1; \
+	fi
+
+focus-wear: guard-wear
+	@echo "🎯 Watch foreground..."
+	@$(ADB_W) shell dumpsys activity top 2>/dev/null | grep -m1 'ACTIVITY' || echo "  (watch package not foreground)"
+
+focus-phone: guard-phone
+	@echo "🎯 Phone foreground..."
+	@$(ADB_P) shell dumpsys activity top 2>/dev/null | grep -m1 'ACTIVITY' || echo "  (phone package not foreground)"
+
+test-real-foreground-stop: install launch clear-logs
+	@echo "═══ Real-device test: foreground loss must stop vibration ═══"
+	@$(MAKE) --no-print-directory tap-constant
+	@sleep 4
+	@echo "─── Notification before HOME ───"
+	@$(MAKE) --no-print-directory watch-notification-status
+	@$(MAKE) --no-print-directory watch-home
+	@sleep 3
+	@echo "─── Watch logs ───"
+	@$(MAKE) --no-print-directory debug-wear
+	@echo "─── Phone logs ───"
+	@$(MAKE) --no-print-directory debug-phone
+	@echo "─── Notification after HOME ───"
+	@$(MAKE) --no-print-directory watch-notification-status
+	@echo "═══ Done ═══"
+
+test-real-silent-recovery: install launch clear-logs
+	@echo "═══ Real-device test: silent-stop recovery ═══"
+	@$(MAKE) --no-print-directory tap-intermittent
+	@sleep 3
+	@$(MAKE) --no-print-directory cancel-watch-vibration
+	@sleep 8
+	@echo "─── Watch logs ───"
+	@$(MAKE) --no-print-directory debug-wear
+	@echo "─── Phone logs ───"
+	@$(MAKE) --no-print-directory debug-phone
+	@echo "─── Notification status ───"
+	@$(MAKE) --no-print-directory watch-notification-status
+	@echo "═══ Done ═══"
+
+test-real-notification-stop: install launch clear-logs
+	@echo "═══ Real-device test: notification STOP action ═══"
+	@$(MAKE) --no-print-directory tap-constant
+	@sleep 4
+	@echo "─── Notification before STOP ───"
+	@$(MAKE) --no-print-directory watch-notification-status
+	@$(MAKE) --no-print-directory watch-notification-stop-action
+	@sleep 3
+	@echo "─── Watch logs ───"
+	@$(MAKE) --no-print-directory debug-wear
+	@echo "─── Phone logs ───"
+	@$(MAKE) --no-print-directory debug-phone
+	@echo "─── Notification after STOP ───"
+	@$(MAKE) --no-print-directory watch-notification-status
+	@echo "─── Phone task transition ───"
+	@$(MAKE) --no-print-directory debug-phone-all
+	@echo "═══ Done ═══"
 
 # ═══════════════════════════════════════════════
 # Misc

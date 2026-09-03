@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">WatchVibe</string>
+    <string name="active_vibration_channel_name">Active vibration</string>
+    <string name="active_vibration_channel_description">Emergency stop while watch vibration is active</string>
+    <string name="active_vibration_notification_title">Vibration active</string>
+    <string name="active_vibration_notification_stop">STOP</string>
+    <string name="active_vibration_notification_unknown">Unknown</string>
+    <string name="notification_access_required_title">Notification access required</string>
+    <string name="notification_access_required_message">Enable notifications to start vibration.</string>
 </resources>

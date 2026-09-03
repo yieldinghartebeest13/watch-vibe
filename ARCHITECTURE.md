@@ -4,7 +4,7 @@ Two companion apps that control a watch's vibration motor from your phone.
 
 ---
 
-## Architecture (v3 — Amplitude API + Renewable Lease)
+## Architecture (v4 — Foreground Gate + Emergency Surface + Silent-Stop Recovery)
 
 ```
 ┌──────────────────────────────────────────┐     ┌────────────────────────────────────┐
@@ -65,12 +65,33 @@ values (0-255). The motor transitions smoothly between amplitude levels rather t
 binary on/off clicking. Burst mode uses a 50ms minimum tap duration to prevent
 motor artifacts at very short timings, keeping its base cycle at 1000ms.
 
-### 3. No command ordering — dedup guard only
+### 3. No command ordering — dedup plus forced reassert
 
-Every command is processed immediately. `VibratorEngine.setModeVibration()` dedup guard:
+Every command is processed immediately. `VibratorEngine.setModeVibration()` still
+uses a dedup guard for ordinary repeated callbacks:
 ```kotlin
 if (mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
 ```
+
+However, silent vibrator stoppage on Wear OS/HAL can leave the app believing the
+current mode is still active. To recover from that, `VibratorEngine` now also
+tracks the timestamp of the last actuator command and exposes a forced
+same-mode restart path:
+- `reassertActiveVibration()` — resend the current mode/level/intensity even if unchanged
+- `shouldReassertActiveVibration(...)` — rate-limit reassert attempts
+
+This keeps normal command handling deduped while still allowing recovery from a
+likely actuator stop.
+
+Reassertion is **cycle-aware**:
+- for fixed patterns, the engine replays immediately only when already near a
+  loop boundary; otherwise it schedules the restart for the next boundary so it
+  does not splice a fresh waveform into the middle of the current cycle
+- `shouldReassertActiveVibration(...)` only returns true when the current
+  actuator command looks stale **and** the next safe restart boundary is near
+- RANDOM mode carries continuity across reasserts by seeding the new section
+  from the prior tail cadence/amplitude, so a forced restart does not feel like
+  a hard discontinuity
 
 ### 4. Dual-lease model (dead-man's switch)
 
@@ -99,8 +120,11 @@ shows "Ready" (connected, not vibrating) instead of "Waiting..." (disconnected).
 the watch restarts the last active mode — but only if the disconnect was
 shorter than `COMMAND_TTL_MS` (30s). Longer disconnects suppress auto-resume.
 
-The UI, notification, and vibration control all derive from the same lease
-values — display and function can never diverge.
+The UI, notification, and vibration control are all bounded by the same lease
+model, but actual vibration is additionally constrained by the **foreground
+gate** and the availability of the emergency notification surface. If the UI is
+not truly foreground, or if the emergency surface cannot be shown, the watch
+cancels vibration instead of continuing unattended.
 
 ### 5. Command TTL and deduplication
 
@@ -141,10 +165,11 @@ process death. When Android kills the background process and recreates it,
 the UI restores the last active tile and re-sends the command to the watch
 (the watch's dedup guard handles the already-active case).
 
-`MainActivity` uses `launchMode="singleTask"` to prevent duplicate Activity
-instances when the user taps the launcher icon. Without it, Android's default
-`standard` mode creates a second task with a fresh ViewModel (no saved state),
-while the original task with the real state sits in the background.
+The watch `MainActivity` uses `launchMode="singleTask"` to avoid stale hidden
+instances when Play Services or the phone relaunches the watch UI. The watch
+app still has **no launcher entry** in disguise mode; `singleTask` is purely a
+task/lifecycle safety measure so wake-ups reuse the existing task instead of
+leaving an older hidden instance behind.
 
 ### 8. Background heartbeat policy
 
@@ -168,10 +193,19 @@ to save battery.
 ### 9. Auto-start on watch
 
 Two layers:
-- **VibrationDataLayerService**: Play Services wakes app on `/launch` or `/control` → starts MainActivity
+- **VibrationDataLayerService**: Play Services wakes the process on `/launch` or
+  active `/control` and starts `MainActivity`
 - **Phone sends `/launch`** on open → triggers wake-up
 
-No boot receiver or foreground service — vibration only runs while MainActivity is visible.
+Important details in the current design:
+- active `/control` commands are forwarded as intent extras and may be **deferred**
+  until the watch UI is truly foreground
+- `/control` STOP/PAUSE no longer wakes the watch UI
+- relaunch uses `NEW_TASK | SINGLE_TOP | CLEAR_TOP` and the Activity is
+  `singleTask`, so wake-ups reuse the existing watch task deterministically
+
+No boot receiver or foreground service — vibration is still activity-scoped,
+but now additionally hard-gated on true foreground visibility.
 
 ### 10. Auto-minimize on background
 
@@ -193,43 +227,65 @@ backgrounding lets the user dismiss the watch instantly by switching apps.
 When vibration is active, the watch NEVER minimizes — the user explicitly
 started vibration and may want to monitor status on their wrist.
 
-### 11. Emergency stop (watch → phone)
+### 11. Emergency stop + foreground gate (watch → phone)
 
-When the user dismisses the watch UI while vibration is active (phone out of
-reach), the watch triggers an emergency stop.
+There are now **two** stop mechanisms on the watch:
 
-**Detection: `onUserLeaveHint()`**
+1. **Foreground gate** — if the UI is not truly foreground, vibration is stopped
+   immediately.
+2. **Emergency stop** — explicit dismissal or notification STOP action also sends
+   `/crown_exit` to the phone.
 
-Fires when the user dismisses the Activity (crown press, swipe away). Works
-identically locked or unlocked — the Activity renders above the keyguard via
-`setShowWhenLocked(true)` + `setTurnScreenOn(true)`.
+#### Foreground gate
+`MainActivity` computes true foreground as:
+- started
+- resumed
+- window-focused
+- not finishing/destroyed
 
-The watch OS keyguard can *also* transiently fire `onUserLeaveHint()` when the
-watch is woken remotely while its screen is off, without actually dismissing
-the Activity. To avoid a phantom emergency stop, the cascade is deferred by
-`EMERGENCY_STOP_GRACE_MS` (2s) and only runs if the Activity has genuinely
-lost window focus by then.
+If that condition becomes false:
+- both leases are cleared
+- vibration is cancelled
+- `/alive` stops
+- ping-based lease extension is ignored
+- the watch sends `/crown_exit` if there was an active session
 
-`exitRequested` flag prevents double-firing and is reset in `onStart()` so
-re-launches (via `SINGLE_TOP`) start with a clean slate. No `finish()` is
-called — avoids Wear OS keyguard anti-re-launch policy that blocked subsequent
-`startActivity()` calls on a locked device.
+This closes the previous bug where a hidden Activity could keep working after
+`onStop()` because its runtime had been started in `onCreate()` and only mostly
+stopped in `onDestroy()`.
 
-**What happens:**
-1. User dismisses watch Activity → `onUserLeaveHint()`
-2. Activity cancels vibration immediately (safety)
-3. `scheduleEmergencyStop()` waits `EMERGENCY_STOP_GRACE_MS` (2s), then
-   `confirmEmergencyStop()` checks `hasWindowFocus()`:
-   - still focused → transient cover (keyguard), abort and reset `exitRequested`
-   - genuinely dismissed → zeroes **both** leases, sets `phoneConnected = false`
-4. Activity sends `/crown_exit` message to phone via `MessageClient`
-5. Phone `WearDataLayer`'s incoming message listener receives `/crown_exit`
-6. `MainViewModel.onCrownExit()` resets UI to "Ready", stops heartbeat,
-   connection monitor, and ping foreground service
-7. `MainActivity` observes `crownExitRequested` → calls `moveTaskToBack(true)`
-   (minimizes the phone app)
-8. When the phone app is reopened, `onForeground()` sends `/launch` →
-   watch wakes up and shows UI again (via VibrationDataLayerService)
+#### Explicit emergency stop
+`onUserLeaveHint()` still detects likely user dismissal, but it no longer
+cancels vibration immediately. Instead:
+1. `onUserLeaveHint()` marks exit pending
+2. `scheduleEmergencyStop()` waits `EMERGENCY_STOP_GRACE_MS` (2s)
+3. `confirmEmergencyStop()` checks `isUiForeground()`
+   - foreground restored → transient cover/keyguard, abort
+   - still not foreground → `performEmergencyStop(...)`
+4. `performEmergencyStop(...)` clears leases, cancels vibration, updates UI,
+   and sends `/crown_exit` when appropriate
+
+#### Notification emergency surface
+While vibration is active **and** the UI is truly foreground, the watch shows an
+ongoing low-priority notification with:
+- tap → reopen watch UI
+- STOP action → explicit emergency stop
+
+The emergency surface is also a **start gate** for active commands:
+- if `POST_NOTIFICATIONS` is missing, the watch keeps the pending wake command,
+  requests permission, and only starts vibration after the grant callback
+- transient focus loss caused by that permission prompt is ignored so the watch
+  does not silently self-stop before the pending command can be retried
+- if permission is denied, or notifications/channel delivery is disabled, the
+  watch does not start vibration and instead shows:
+  - `Notification access required`
+  - `Enable notifications to start vibration.`
+
+If the notification becomes unavailable mid-session (permission revoked,
+notifications/channel disabled, or post failure), the watch performs an
+emergency stop first and then prompts for permission or notification settings as
+needed. This guarantees there is always an emergency exit surface during an
+active session.
 
 **Phone message listener:**
 `WearDataLayer` registers a `MessageClient.OnMessageReceivedListener` that
@@ -293,38 +349,41 @@ on a dedicated stats screen.
 - Uses `suppressMinimize` flag to prevent watch dismissal when opening
   the stats screen (internal activity transition)
 
-### 14. No foreground service — vibration is activity-scoped
+### 14. No foreground service — vibration is activity-scoped and foreground-gated
 
 `VibrationForegroundService` has been removed. All vibration control,
-listeners, lease management, and battery monitoring now live directly in
-`MainActivity`. Vibration only runs while the activity is visible.
+listeners, lease management, silent-stop recovery, emergency-surface checks,
+and battery monitoring now live directly in `MainActivity` / `VibratorEngine`.
+
+Vibration is allowed only when **all** of these are true:
+1. the watch UI is truly foreground (`started + resumed + window-focused`)
+2. the vibration lease is current
+3. the emergency notification surface is available
+
+If any of those fail, the watch cancels vibration.
 
 **Rationale:**
-1. `MainActivity.onUserLeaveHint()` triggers emergency stop whenever the
-activity is dismissed, immediately cancelling vibration.
-2. `FLAG_KEEP_SCREEN_ON` prevents the screen from timing out while the
-activity is visible.
-3. The only way to dismiss the activity (crown press, swipe) triggers the
-emergency stop path — vibration can never run unattended.
-4. Eliminating the foreground service removes ~600 lines and simplifies
-the architecture: there is exactly one place where vibration can start,
-and exactly one place where it must stop.
+1. Wear OS can background an Activity without destroying it; `onUserLeaveHint()`
+   alone is not a sufficient safety boundary.
+2. The foreground gate makes hidden-state vibration impossible.
+3. The ongoing notification provides a last-resort STOP path while vibration is active.
+4. Eliminating the foreground service still keeps the runtime simple: one
+   Activity owns the session, and it becomes inert immediately when not truly foreground.
 
 ### 15. Reversed heartbeat — /alive (watch → phone)
 
-The watch sends an `/alive` message to the phone every 2 seconds while
-`MainActivity` is visible and running. The phone tracks the timestamp of
-the last received `/alive` and considers the watch "connected" only if
-a signal arrived within the last 5 seconds (`ALIVE_TIMEOUT_MS`).
+The watch sends an `/alive` message to the phone every 2 seconds only while
+`MainActivity` is truly foreground and ready for commands. The phone tracks the
+timestamp of the last received `/alive` and considers the watch "connected" only
+if a signal arrived within the last 5 seconds (`ALIVE_TIMEOUT_MS`).
 
 A periodic checker in `MainViewModel.startConnectionMonitor()` flips
 `watchConnected` to `false` if no `/alive` arrives within the timeout.
 
-This is reliable across all scenarios:
-- **First launch**: watch starts sending → phone sees it within 2s
-- **Minimize/reopen**: watch keeps sending while visible → phone
-  immediately knows when user returns
-- **Watch dismissed**: watch stops sending → phone detects within 5s
+This now means:
+- **First launch**: watch foregrounds → phone sees `/alive` within 2s
+- **Minimize/reopen**: watch stops `/alive` while hidden and resumes when visible again
+- **Watch dismissed / focus lost**: `/alive` stops and phone detects it within 5s
 - **Connection drop**: signals stop arriving → phone detects within 5s
 
 The `CapabilityClient` listener is still used for **fast disconnect
@@ -334,12 +393,22 @@ the 5-second alive timeout.
 
 ### 16. Wake-up command forwarding
 
-`VibrationDataLayerService` now extracts control command data (mode, level,
+`VibrationDataLayerService` extracts control command data (mode, level,
 intensity, timestamp) from incoming `/control` DataItems and Messages and
-passes them as Intent extras to `MainActivity`. This prevents command loss
-during the launch window: if the user taps a mode tile while the watch
-app is still starting, the command is forwarded and applied immediately
-in `onCreate()` instead of being silently dropped.
+passes them as Intent extras to `MainActivity`.
+
+Current behavior:
+- active `/control` commands may wake the watch UI
+- duplicate timestamped active-control wake deliveries are deduped for a short
+  window so the same command does not relaunch the watch twice via DataItem +
+  Message delivery
+- if `MainActivity` is already truly foreground, the service skips the wake-up
+  relaunch entirely and lets the existing Activity handle the live command
+- forwarded commands are **deferred until true foreground** if the Activity
+  instance exists but is not yet safe to vibrate
+- STOP/PAUSE commands do **not** wake the UI anymore
+- relaunch uses `CLEAR_TOP` so an existing watch task is reused instead of
+  leaving a hidden stale instance behind
 
 Additionally, when the phone receives the first `/alive` after being
 disconnected, it re-sends the active vibration command — recovering from
@@ -361,18 +430,20 @@ after the user unlocks, starting the connection once.
 
 ## Vibration Modes (6 total)
 
-All modes normalized to ~1000ms cycle at slow speed (level 0), scaling proportionally.
+Most modes target an approximately 1000ms slow-speed cycle; RANDOM instead uses
+a 30-step level-dependent section with no fixed average.
 
-| Mode | Value | API | Pattern | 1000ms @ L0 |
-|------|-------|-----|---------|-------------|
-| Constant | 0 | Amplitude | `[5000ms at 255]` looped | Continuous |
+| Mode | Value | API | Pattern | Slow-speed shape |
+|------|-------|-----|---------|------------------|
+| Constant | 0 | Amplitude | `[1000ms at 255]` looped | Continuous |
 | Intermittent | 1 | Amplitude | 70/30 on/off duty | 700+300=1000ms |
 | Ramp | 2 | Amplitude | 5 ascending amplitude steps | 5×200=1000ms |
 | Burst | 3 | Amplitude | 3 taps + pause, 50ms floor | 5×150+250=1000ms |
 | Wave | 4 | Amplitude | 20-step sine, starts at trough | 20×50=1000ms |
-| Random | 5 | Amplitude | 30 random segments | ~1000ms avg |
+| Random | 5 | Amplitude | 30 random segments, continuity-seeded on reassert | 100-500ms segment range |
 
-Speed levels (0-3) scale all timings proportionally.
+Speed levels (0-3) use per-mode timing tables; RANDOM narrows its duration
+range as speed increases instead of trying to preserve a fixed cycle length.
 
 ---
 
@@ -430,12 +501,16 @@ Tap active tile again = stop.
 └──────────────────────────────┘
 ```
 
-Status line shows: mode name when active, "Ready" when idle, "Waiting..."
-when disconnected. All touch/back/swipe blocked (kiosk mode).
+Status line shows: mode name when active, `Notification access required` /
+`Enable notifications to start vibration.` when start is blocked by notification
+gating, `"Ready"` when idle, and `"Waiting..."` when disconnected. All
+touch/back/swipe blocked (kiosk mode).
 
-Exit (emergency stop) via `onUserLeaveHint()` when the user dismisses the
-Activity. Works identically locked or unlocked — the Activity renders above
-the keyguard via `setShowWhenLocked(true)`.
+Exit paths:
+- dismissing the Activity triggers the deferred `onUserLeaveHint()` emergency-stop path
+- while vibrating, an ongoing notification also exposes a STOP action
+
+The Activity still renders above the keyguard via `setShowWhenLocked(true)`.
 
 ---
 
@@ -444,9 +519,10 @@ the keyguard via `setShowWhenLocked(true)`.
 | Layer | Watch | Phone |
 |-------|-------|-------|
 | CapabilityClient listener | Detects phone presence → immediate cancel | Detects watch capability (fast disconnect only) |
-| Reversed heartbeat `/alive` | Watch → phone every 2s while Activity visible | Gates `watchConnected` (true when /alive within 5s) |
-| Heartbeat ping (dual) | Phone → watch every 1s via DataClient + MessageClient | Phone sends |
-| Command recovery | Intent extras forwarded by VibrationDataLayerService | Re-sends active command on first /alive after connect |
+| Reversed heartbeat `/alive` | Watch → phone every 2s while Activity is truly foreground | Gates `watchConnected` (true when /alive within 5s) |
+| Heartbeat ping (dual) | Phone → watch every 1s via DataClient + MessageClient; hidden watch ignores lease renewal | Phone sends |
+| Command recovery | Intent extras forwarded by VibrationDataLayerService; commands deferred until foreground-safe | Re-sends active command on first /alive after connect |
+| Silent-stop recovery | Watch periodically reasserts active mode while lease is current and UI is foreground | — |
 | Connection lease expiry (safety net) | 3s after last ping → both leases zeroed, cancel | N/A |
 | Vibration lease | Extended by pings; zeroed by STOP; drives auto-resume | — |
 | UI connection status | Derived from connectionLease (`connectionLeaseExpiry > now`) | — |
@@ -490,12 +566,12 @@ app/src/main/
 
 ```
 app/src/main/
-├── AndroidManifest.xml       # VIBRATE only
+├── AndroidManifest.xml       # VIBRATE + POST_NOTIFICATIONS permissions
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
-│   ├── VibratorEngine.kt          # 6 modes, amplitude API, 4-stage cancel
-│   ├── VibrationDataLayerService.kt  # Wake-up only → launches MainActivity
-│   └── MainActivity.kt               # Kiosk mode + listeners + lease monitor + battery
+│   ├── VibratorEngine.kt          # 6 modes, amplitude API, cycle-aware reassert
+│   ├── VibrationDataLayerService.kt  # Wake dedupe + foreground-aware MainActivity launch
+│   └── MainActivity.kt               # Kiosk mode + foreground gate + notification safety
 └── res/
     ├── layout/activity_main.xml
     └── drawable/ic_vibration.xml
@@ -530,6 +606,23 @@ make debug-wear       # VibeAct|VibeWake
 make debug-phone      # VibeWearDL
 make debug-wear-all   # All buffers, broad filter
 make debug-phone-all
+```
+
+### Real-device helpers
+```bash
+make focus-wear                      # Show current watch foreground activity
+make focus-phone                     # Show current phone foreground activity
+make watch-home                      # Send HOME to the watch
+make cancel-watch-vibration          # Force-cancel watch vibrator from adb shell
+make watch-notification-status       # Inspect active watch notification state
+make watch-notification-stop-action  # Fire the watch STOP notification intent
+```
+
+### Real-device safety checks
+```bash
+make test-real-foreground-stop    # Active vibration must stop on HOME/background
+make test-real-silent-recovery    # Manual shell cancel should be reasserted
+make test-real-notification-stop  # Notification STOP must end session on both sides
 ```
 
 ### Log tags

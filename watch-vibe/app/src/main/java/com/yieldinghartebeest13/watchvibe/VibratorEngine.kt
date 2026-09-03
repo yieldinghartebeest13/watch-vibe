@@ -1,11 +1,15 @@
 package com.yieldinghartebeest13.watchvibe
 
+import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.content.Context
+import kotlin.random.Random
 
 /**
  * Core vibration engine using amplitude-based VibrationEffect APIs.
@@ -28,9 +32,36 @@ import android.content.Context
  * Intensity (0-100) scales amplitudes via scalePower.
  *
  * Dedup: calling setModeVibration with identical mode+level+intensity is a no-op,
- * preventing stutter from multiple listener callbacks.
+ * preventing stutter from multiple listener callbacks. Recovery code can still
+ * force a same-mode reassert when the actuator likely stopped silently.
  */
-class VibratorEngine(context: Context) {
+class VibratorEngine(
+    context: Context,
+    private val nextRandomDuration: (Long, Long) -> Long = { minMs, maxMs ->
+        if (maxMs <= minMs) minMs else minMs + Random.Default.nextLong(maxMs - minMs)
+    },
+    private val nextRandomAmplitude: () -> Int = { Random.Default.nextInt(256) }
+) {
+
+    companion object {
+        private const val CONSTANT_CYCLE_MS = 1_000L
+        private const val RANDOM_SECTION_STEPS = 30
+        private const val RANDOM_CONTINUITY_SAMPLE_STEPS = 3
+        private const val MAX_REASSERT_SCHEDULE_AHEAD_MS = 1_000L
+    }
+
+    private data class RandomContinuity(
+        val cadenceMs: Long,
+        val amplitude: Int
+    )
+
+    private data class PatternPlan(
+        val timings: LongArray,
+        val amplitudes: IntArray,
+        val cycleDurationMs: Long,
+        val boundaryWindowMs: Long,
+        val randomContinuity: RandomContinuity? = null
+    )
 
     private val vibratorManager: VibratorManager? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -44,10 +75,16 @@ class VibratorEngine(context: Context) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
+    private val reassertHandler = Handler(Looper.getMainLooper())
+
     private var currentMode: Int = AppConstants.MODE_PAUSE
     private var currentLevel: Int = AppConstants.LEVEL_SLOW
     private var currentIntensity: Int = 100
     private var isActive: Boolean = false
+    private var lastActuatorCommandElapsedMs: Long = 0
+    private var currentPatternPlan: PatternPlan? = null
+    private var pendingReassertRunnable: Runnable? = null
+    private var pendingReassertAtElapsedMs: Long = 0
 
     val mode: Int get() = currentMode
     val level: Int get() = currentLevel
@@ -58,8 +95,11 @@ class VibratorEngine(context: Context) {
 
     @Synchronized
     fun cancel() {
+        clearPendingReassertLocked()
         isActive = false
         currentMode = AppConstants.MODE_PAUSE
+        currentPatternPlan = null
+        lastActuatorCommandElapsedMs = 0
 
         // 1. Cancel via VibratorManager (API 31+) — cancels ALL vibrators
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -101,7 +141,51 @@ class VibratorEngine(context: Context) {
      */
     @Synchronized
     fun setModeVibration(mode: Int, level: Int, intensity: Int = 100) {
-        if (mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
+        applyModeVibration(mode, level, intensity, force = false)
+    }
+
+    @Synchronized
+    fun reassertActiveVibration(): Boolean = reassertActiveVibration(SystemClock.elapsedRealtime())
+
+    @Synchronized
+    internal fun reassertActiveVibration(nowElapsedMs: Long): Boolean {
+        if (!isActive || currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
+            return false
+        }
+        if (pendingReassertRunnable != null) return false
+
+        val delayMs = computeReassertDelayLocked(nowElapsedMs)
+        if (delayMs <= 0L) {
+            applyModeVibration(currentMode, currentLevel, currentIntensity, force = true)
+            return isActive
+        }
+        if (delayMs > MAX_REASSERT_SCHEDULE_AHEAD_MS) {
+            return false
+        }
+
+        scheduleReassertLocked(delayMs, nowElapsedMs)
+        return true
+    }
+
+    @Synchronized
+    internal fun shouldReassertActiveVibration(nowElapsedMs: Long, staleAfterMs: Long): Boolean {
+        if (!isActive || currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
+            return false
+        }
+        if (pendingReassertRunnable != null) return false
+        if (staleAfterMs > 0L && lastActuatorCommandElapsedMs > 0L) {
+            if (nowElapsedMs - lastActuatorCommandElapsedMs < staleAfterMs) {
+                return false
+            }
+        }
+        return computeReassertDelayLocked(nowElapsedMs) <= MAX_REASSERT_SCHEDULE_AHEAD_MS
+    }
+
+    private fun applyModeVibration(mode: Int, level: Int, intensity: Int, force: Boolean) {
+        if (!force && mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
+
+        clearPendingReassertLocked()
+        val previousRandomContinuity = currentRandomContinuityLocked()
 
         currentMode = mode
         currentLevel = level
@@ -114,11 +198,9 @@ class VibratorEngine(context: Context) {
             }
 
             AppConstants.MODE_CONSTANT -> {
-                val timings = longArrayOf(5000)
+                val timings = longArrayOf(CONSTANT_CYCLE_MS)
                 val amplitudes = intArrayOf(255)
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                activatePattern(mode, timings, amplitudes)
             }
 
             AppConstants.MODE_INTERMITTENT -> {
@@ -132,9 +214,7 @@ class VibratorEngine(context: Context) {
                 }
                 val timings = longArrayOf(on, off)
                 val amplitudes = intArrayOf(255, 0)
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                activatePattern(mode, timings, amplitudes)
             }
 
             AppConstants.MODE_RAMP -> {
@@ -144,9 +224,7 @@ class VibratorEngine(context: Context) {
                 }
                 val timings = LongArray(count) { stepMs }
                 val amplitudes = IntArray(count) { i -> ((i + 1) * 255 / count) }
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                activatePattern(mode, timings, amplitudes)
             }
 
             AppConstants.MODE_BURST -> {
@@ -162,9 +240,7 @@ class VibratorEngine(context: Context) {
                 }
                 val timings = longArrayOf(tap, tap, tap, tap, tap, pause)
                 val amplitudes = intArrayOf(255, 0, 255, 0, 255, 0)
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                activatePattern(mode, timings, amplitudes)
             }
 
             AppConstants.MODE_WAVE -> {
@@ -178,26 +254,12 @@ class VibratorEngine(context: Context) {
                     val angle = -Math.PI / 2 + i * 2.0 * Math.PI / steps
                     ((Math.sin(angle) * 127 + 128).toInt()).coerceIn(0, 255)
                 }
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                activatePattern(mode, timings, amplitudes)
             }
 
             AppConstants.MODE_RANDOM -> {
-                // Long pattern (30 steps) — loop is long enough to feel unpredictable.
-                val count = 30
-                val (minMs, maxMs) = when (level.coerceIn(0, 3)) {
-                    0 -> 100L to 500L
-                    1 -> 60L to 350L
-                    2 -> 30L to 200L
-                    3 -> 15L to 120L
-                    else -> 100L to 500L
-                }
-                val timings = LongArray(count) { minMs + (Math.random() * (maxMs - minMs)).toLong() }
-                val amplitudes = IntArray(count) { (Math.random() * 256).toInt() }
-                val (t, a) = scalePower(timings, amplitudes, currentIntensity)
-                isActive = true
-                vibrate(t, a)
+                val (timings, amplitudes) = buildRandomPattern(level, previousRandomContinuity)
+                activatePattern(mode, timings, amplitudes)
             }
         }
     }
@@ -208,8 +270,9 @@ class VibratorEngine(context: Context) {
      * Use for external pattern editors / live control surfaces.
      */
     fun vibratePulse(timings: LongArray, repeat: Int = -1) {
-        if (!vibrator.hasVibrator()) return
+        lastActuatorCommandElapsedMs = SystemClock.elapsedRealtime()
         isActive = true
+        if (!vibrator.hasVibrator()) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val effect = VibrationEffect.createWaveform(timings, repeat)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -243,6 +306,7 @@ class VibratorEngine(context: Context) {
      * where each step has its own duration and amplitude (0-255).
      */
     private fun vibrate(timings: LongArray, amplitudes: IntArray) {
+        lastActuatorCommandElapsedMs = SystemClock.elapsedRealtime()
         if (!vibrator.hasVibrator()) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -284,4 +348,130 @@ class VibratorEngine(context: Context) {
             else pattern[i]
         }
     }
+
+    private fun activatePattern(mode: Int, timings: LongArray, amplitudes: IntArray) {
+        val randomContinuity = if (mode == AppConstants.MODE_RANDOM) {
+            extractRandomContinuity(timings, amplitudes)
+        } else {
+            null
+        }
+        val (scaledTimings, scaledAmplitudes) = scalePower(timings, amplitudes, currentIntensity)
+        currentPatternPlan = createPatternPlan(scaledTimings, scaledAmplitudes, randomContinuity)
+        isActive = true
+        vibrate(scaledTimings, scaledAmplitudes)
+    }
+
+    private fun createPatternPlan(
+        timings: LongArray,
+        amplitudes: IntArray,
+        randomContinuity: RandomContinuity? = null
+    ): PatternPlan {
+        val cycleDurationMs = timings.sum().coerceAtLeast(1L)
+        val boundaryWindowMs = computeBoundaryWindowMs(timings, cycleDurationMs)
+        return PatternPlan(timings, amplitudes, cycleDurationMs, boundaryWindowMs, randomContinuity)
+    }
+
+    private fun buildRandomPattern(level: Int, continuity: RandomContinuity?): Pair<LongArray, IntArray> {
+        val count = RANDOM_SECTION_STEPS
+        val (minMs, maxMs) = when (level.coerceIn(0, 3)) {
+            0 -> 100L to 500L
+            1 -> 60L to 350L
+            2 -> 30L to 200L
+            3 -> 15L to 120L
+            else -> 100L to 500L
+        }
+        val timings = LongArray(count) { nextRandomDuration(minMs, maxMs) }
+        val amplitudes = IntArray(count) { nextRandomAmplitude().coerceIn(0, 255) }
+
+        continuity?.let {
+            timings[0] = it.cadenceMs.coerceIn(minMs, maxMs)
+            amplitudes[0] = it.amplitude.coerceIn(0, 255)
+            if (count > 1) {
+                timings[1] = ((timings[0] + timings[1]) / 2L).coerceIn(minMs, maxMs)
+                amplitudes[1] = ((amplitudes[0] + amplitudes[1]) / 2).coerceIn(0, 255)
+            }
+        }
+
+        return Pair(timings, amplitudes)
+    }
+
+    private fun extractRandomContinuity(timings: LongArray, amplitudes: IntArray): RandomContinuity {
+        val sampleCount = minOf(RANDOM_CONTINUITY_SAMPLE_STEPS, timings.size)
+        val cadenceMs = if (sampleCount == 0) {
+            1L
+        } else {
+            var total = 0L
+            for (i in timings.size - sampleCount until timings.size) {
+                total += timings[i]
+            }
+            (total / sampleCount).coerceAtLeast(1L)
+        }
+        val amplitude = amplitudes.lastOrNull()?.coerceIn(0, 255) ?: 0
+        return RandomContinuity(cadenceMs, amplitude)
+    }
+
+    private fun computeBoundaryWindowMs(timings: LongArray, cycleDurationMs: Long): Long {
+        val minStepMs = timings.minOrNull() ?: cycleDurationMs
+        return maxOf(8L, minOf(60L, minStepMs / 2L)).coerceAtMost(cycleDurationMs)
+    }
+
+    private fun computeReassertDelayLocked(nowElapsedMs: Long): Long {
+        val plan = currentPatternPlan ?: return 0L
+        if (lastActuatorCommandElapsedMs <= 0L || plan.cycleDurationMs <= 0L) return 0L
+
+        val ageMs = nowElapsedMs - lastActuatorCommandElapsedMs
+        if (ageMs <= plan.boundaryWindowMs) return 0L
+
+        val phaseMs = ageMs.mod(plan.cycleDurationMs)
+        if (phaseMs <= plan.boundaryWindowMs) return 0L
+
+        return plan.cycleDurationMs - phaseMs
+    }
+
+    private fun currentRandomContinuityLocked(): RandomContinuity? =
+        if (currentMode == AppConstants.MODE_RANDOM) currentPatternPlan?.randomContinuity else null
+
+    private fun scheduleReassertLocked(delayMs: Long, nowElapsedMs: Long) {
+        clearPendingReassertLocked()
+        val runnable = object : Runnable {
+            override fun run() {
+                synchronized(this@VibratorEngine) {
+                    if (pendingReassertRunnable !== this) return
+                    pendingReassertRunnable = null
+                    pendingReassertAtElapsedMs = 0L
+                    if (!isActive || currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
+                        return
+                    }
+                    applyModeVibration(currentMode, currentLevel, currentIntensity, force = true)
+                }
+            }
+        }
+        pendingReassertRunnable = runnable
+        pendingReassertAtElapsedMs = nowElapsedMs + delayMs
+        reassertHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun clearPendingReassertLocked() {
+        pendingReassertRunnable?.let { reassertHandler.removeCallbacks(it) }
+        pendingReassertRunnable = null
+        pendingReassertAtElapsedMs = 0L
+    }
+
+    internal fun currentPatternTimingsForTesting(): LongArray =
+        currentPatternPlan?.timings?.clone() ?: longArrayOf()
+
+    internal fun currentPatternAmplitudesForTesting(): IntArray =
+        currentPatternPlan?.amplitudes?.clone() ?: intArrayOf()
+
+    internal fun currentPatternCycleDurationMsForTesting(): Long =
+        currentPatternPlan?.cycleDurationMs ?: 0L
+
+    internal fun currentPatternBoundaryWindowMsForTesting(): Long =
+        currentPatternPlan?.boundaryWindowMs ?: 0L
+
+    internal fun lastActuatorCommandElapsedMsForTesting(): Long = lastActuatorCommandElapsedMs
+
+    internal fun pendingReassertAtElapsedMsForTesting(): Long = pendingReassertAtElapsedMs
+
+    internal fun hasPendingReassertForTesting(): Boolean = pendingReassertRunnable != null
 }
