@@ -2,14 +2,19 @@ package com.yieldinghartebeest13.watchvibe
 
 import android.app.Application
 import android.content.Intent
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,24 +30,30 @@ class MainViewModel(
     companion object {
         private const val KEY_MODE = "saved_mode"
         private const val KEY_LEVEL = "saved_level"
+        private const val KEY_INTENSITY = "saved_intensity"
     }
 
-    private val wearDataLayer = WearDataLayer(application)
-    private val statsDb = StatsDb(application)
+    private val wearDataLayer = WearDataLayer.getInstance(application)
+    private val sessionRecorder = SessionRecorder()
 
-    // Restore mode/level from saved state (survives process death).
-    // isVibrating always starts false — the watch state is authoritative.
+    // Restore selection, not permission to restart. Only onForeground after
+    // the Activity's authentication gate may apply a restored active mode.
     private val _mode = MutableStateFlow(
-        savedStateHandle.get<Int>(KEY_MODE) ?: AppConstants.MODE_PAUSE
+        savedStateHandle.get<Int>(KEY_MODE)?.takeIf {
+            it in AppConstants.MODE_CONSTANT..AppConstants.MODE_RANDOM ||
+                it == AppConstants.MODE_STOP || it == AppConstants.MODE_PAUSE
+        } ?: AppConstants.MODE_PAUSE
     )
     val mode: StateFlow<Int> = _mode.asStateFlow()
 
     private val _level = MutableStateFlow(
-        savedStateHandle.get<Int>(KEY_LEVEL) ?: 0
+        (savedStateHandle.get<Int>(KEY_LEVEL) ?: 0).coerceIn(0, 3)
     )
     val level: StateFlow<Int> = _level.asStateFlow()
 
-    private val _intensity = MutableStateFlow(50)
+    private val _intensity = MutableStateFlow(
+        (savedStateHandle.get<Int>(KEY_INTENSITY) ?: 100).coerceIn(0, 100)
+    )
     val intensity: StateFlow<Int> = _intensity.asStateFlow()
 
     private val _isVibrating = MutableStateFlow(false)
@@ -65,35 +76,9 @@ class MainViewModel(
     private val _crownExitRequested = MutableStateFlow(false)
     val crownExitRequested: StateFlow<Boolean> = _crownExitRequested.asStateFlow()
 
-    // ── Session stats ────────────────────────────────────
+    private var minimizeJob: Job? = null
+    private var connectionMonitorGeneration = 0
 
-    private val _weeklyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
-    val weeklyStats: StateFlow<StatsDb.MergedStats> = _weeklyStats.asStateFlow()
-
-    private val _monthlyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
-    val monthlyStats: StateFlow<StatsDb.MergedStats> = _monthlyStats.asStateFlow()
-
-    private val _yearlyStats = MutableStateFlow(StatsDb.MergedStats(0, 0, emptyList(), emptyList()))
-    val yearlyStats: StateFlow<StatsDb.MergedStats> = _yearlyStats.asStateFlow()
-
-    private val _recentSessions = MutableStateFlow<List<StatsDb.SessionEntry>>(emptyList())
-    val recentSessions: StateFlow<List<StatsDb.SessionEntry>> = _recentSessions.asStateFlow()
-
-    private var sessionStartMs: Long = 0
-    private var sessionMode: Int = 0
-    private var sessionLevel: Int = 0
-
-    init {
-        // If the UI was showing an active mode before process death,
-        // re-send it so the watch state and UI state are consistent.
-        val restoredMode = _mode.value
-        if (restoredMode != AppConstants.MODE_STOP && restoredMode != AppConstants.MODE_PAUSE) {
-            applyVibration()
-        }
-        refreshStats()
-    }
-
-    private var heartbeatJob: Job? = null
     private var capabilityListenerRegistered = false
     private var capabilityListener: CapabilityClient.OnCapabilityChangedListener? = null
     private var aliveChecker: Job? = null
@@ -106,19 +91,23 @@ class MainViewModel(
     /** Called when the activity comes to the foreground. */
     fun onForeground() {
         isInForeground = true
-        startHeartbeat()
+        minimizeJob?.cancel()
+        minimizeJob = null
+        if (!_isVibrating.value && _mode.value in AppConstants.MODE_CONSTANT..AppConstants.MODE_RANDOM) {
+            applyVibration()
+        } else {
+            updateHeartbeatOwnership()
+        }
         startConnectionMonitor()
-        refreshStats()
     }
 
     /**
      * Called when the activity goes to the background.
-     * Only stops the heartbeat if no vibration is active — if the user
-     * put the phone away while vibrating, pings must continue so the
-     * watch doesn't trigger a disconnect.
+     * Idle status pings stop; the service alone protects active vibration.
      */
     fun onBackground() {
         isInForeground = false
+        updateHeartbeatOwnership()
         if (suppressMinimize) {
             suppressMinimize = false
             return
@@ -128,34 +117,43 @@ class MainViewModel(
             stopConnectionMonitor()
             // Not vibrating — tell the watch to minimize so the user
             // doesn't have to manually dismiss it.
-            viewModelScope.launch { wearDataLayer.sendMinimize() }
+            minimizeJob?.cancel()
+            minimizeJob = viewModelScope.launch { wearDataLayer.sendMinimize() }
         }
     }
 
-    private fun startHeartbeat() {
-        heartbeatJob?.cancel()
-        heartbeatJob = viewModelScope.launch {
-            while (isActive) {
-                delay(AppConstants.HEARTBEAT_INTERVAL_MS)
-                wearDataLayer.sendPing()
-            }
+    private fun updateHeartbeatOwnership() {
+        val owner = when {
+            _isVibrating.value -> PhoneHeartbeat.Owner.SERVICE
+            isInForeground -> PhoneHeartbeat.Owner.IDLE_FOREGROUND
+            else -> PhoneHeartbeat.Owner.NONE
+        }
+        wearDataLayer.heartbeat.setOwner(owner)
+        if (owner == PhoneHeartbeat.Owner.IDLE_FOREGROUND) {
+            wearDataLayer.heartbeat.start(owner, viewModelScope) { wearDataLayer.sendPing() }
         }
     }
 
     fun stopHeartbeat() {
-        heartbeatJob?.cancel()
-        heartbeatJob = null
+        if (wearDataLayer.heartbeat.isOwner(PhoneHeartbeat.Owner.IDLE_FOREGROUND)) {
+            wearDataLayer.heartbeat.setOwner(PhoneHeartbeat.Owner.NONE)
+        }
     }
 
     fun startConnectionMonitor() {
         if (capabilityListenerRegistered) return
         capabilityListenerRegistered = true
+        wearDataLayer.onHeartbeatFailure = {
+            setMode(AppConstants.MODE_STOP)
+            _statusText.value = "Unable to keep connection active"
+        }
+        val generation = ++connectionMonitorGeneration
 
         // Initial check — only used for wake-up. Don't set watchConnected yet;
         // the watch must explicitly signal readiness via /alive.
         viewModelScope.launch {
             val hasNode = wearDataLayer.isWearConnected()
-            if (hasNode) {
+            if (hasNode && generation == connectionMonitorGeneration) {
                 wearDataLayer.sendWakeUp()
             }
         }
@@ -176,7 +174,7 @@ class MainViewModel(
                     // before the watch was fully launched and ready.
                     if (_isVibrating.value) {
                         viewModelScope.launch {
-                            wearDataLayer.sendControl(_mode.value, _level.value, 100)
+                            wearDataLayer.sendControl(_mode.value, _level.value, _intensity.value)
                         }
                     }
                 }
@@ -212,31 +210,29 @@ class MainViewModel(
         }
         capabilityListener = listener
 
-        viewModelScope.launch {
-            try {
-                val capClient = Wearable.getCapabilityClient(getApplication<Application>())
-                capClient.addListener(listener, AppConstants.CAPABILITY_VIBRATION).await()
-            } catch (e: Exception) {
-                capabilityListenerRegistered = false
+        val capClient = Wearable.getCapabilityClient(getApplication<Application>())
+        capClient.addListener(listener, AppConstants.CAPABILITY_VIBRATION)
+            .addOnSuccessListener {
+                if (generation != connectionMonitorGeneration) capClient.removeListener(listener)
             }
-        }
+            .addOnFailureListener {
+                if (generation == connectionMonitorGeneration) stopConnectionMonitor()
+            }
     }
 
     fun stopConnectionMonitor() {
         aliveChecker?.cancel()
         aliveChecker = null
-        val listener = capabilityListener ?: return
+        ++connectionMonitorGeneration
+        val listener = capabilityListener
         capabilityListener = null
         capabilityListenerRegistered = false
-        viewModelScope.launch {
-            try {
-                val capClient = Wearable.getCapabilityClient(getApplication<Application>())
-                capClient.removeListener(listener).await()
-            } catch (_: Exception) {
-                // Listener may already be unregistered — safe to ignore
-            }
+        // Do not launch cleanup into viewModelScope: it is cancelled in onCleared.
+        if (listener != null) {
+            Wearable.getCapabilityClient(getApplication<Application>()).removeListener(listener)
         }
         wearDataLayer.stopMessageListener()
+        wearDataLayer.onHeartbeatFailure = null
     }
 
     fun checkWearConnection() {
@@ -255,6 +251,7 @@ class MainViewModel(
 
     fun setIntensity(value: Int) {
         _intensity.value = value.coerceIn(0, 100)
+        savedStateHandle[KEY_INTENSITY] = _intensity.value
         applyVibration()
     }
 
@@ -279,12 +276,12 @@ class MainViewModel(
     private fun applyVibration() {
         val currentMode = _mode.value
         val currentLevel = _level.value
+        recordTransition(currentMode, currentLevel)
 
         if (currentMode == AppConstants.MODE_STOP || currentMode == AppConstants.MODE_PAUSE) {
-            val wasVibrating = _isVibrating.value
             _isVibrating.value = false
             _statusText.value = "Ready"
-            if (wasVibrating) recordSessionEnd()
+            updateHeartbeatOwnership()
             // If the user stops vibration while the app is in the background,
             // there's no reason to keep the heartbeat alive.
             if (!isInForeground) {
@@ -294,69 +291,64 @@ class MainViewModel(
             // Stop the foreground service — no vibration to protect.
             stopPingService()
         } else {
-            val wasVibrating = _isVibrating.value
             _isVibrating.value = true
-            if (!wasVibrating) recordSessionStart(currentMode, currentLevel)
+            minimizeJob?.cancel()
+            minimizeJob = null
+            updateHeartbeatOwnership()
             val modeLabel = AppConstants.MODE_LABELS[currentMode] ?: "Unknown"
             val speedLabel = AppConstants.SPEED_LABELS[currentLevel]
             _statusText.value = "$modeLabel - $speedLabel"
-            // Ensure heartbeat runs even if the user activated this from
-            // a notification or the app is otherwise backgrounded.
-            if (!isInForeground) {
-                startHeartbeat()
+            // The service is the only active-mode heartbeat owner, including
+            // while this Activity is in the foreground.
+            if (!startPingService(modeLabel, speedLabel)) {
+                setMode(AppConstants.MODE_STOP)
+                _statusText.value = "Unable to keep connection active"
+                return
             }
-            // Start a foreground service that keeps the ping heartbeat
-            // alive when the app is backgrounded. Android's background
-            // execution limits would otherwise freeze the ViewModel
-            // coroutine and the watch's lease expires → vibration stops.
-            startPingService(modeLabel, speedLabel)
         }
 
         viewModelScope.launch {
-            wearDataLayer.sendControl(currentMode, currentLevel, 100)
+            wearDataLayer.sendControl(currentMode, currentLevel, _intensity.value)
         }
     }
 
     // ── Session recording ─────────────────────────────────
 
-    private fun recordSessionStart(mode: Int, level: Int) {
-        sessionStartMs = System.currentTimeMillis()
-        sessionMode = mode
-        sessionLevel = level
-    }
-
-    private fun recordSessionEnd() {
-        if (sessionStartMs == 0L) return
-        val durationMs = System.currentTimeMillis() - sessionStartMs
-        sessionStartMs = 0
-        // Ignore ultra-short sessions (<500ms) as accidental taps
-        if (durationMs < 500) return
-        viewModelScope.launch {
-            statsDb.insert(sessionMode, sessionLevel, durationMs, System.currentTimeMillis())
-            refreshStats()
-        }
-    }
-
-    fun refreshStats() {
-        viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            _weeklyStats.value = statsDb.mergedQuery(now - 7 * 24 * 3600_000L)
-            _monthlyStats.value = statsDb.mergedQuery(now - 30 * 24 * 3600_000L)
-            _yearlyStats.value = statsDb.mergedQuery(now - 365 * 24 * 3600_000L)
-            _recentSessions.value = statsDb.recentSessions(20)
+    private fun recordTransition(mode: Int, level: Int) {
+        val run = sessionRecorder.transition(mode, level, System.currentTimeMillis(),
+            SystemClock.elapsedRealtime()) ?: return
+        val application = getApplication<Application>()
+        // Finite local write: Activity/ViewModel cleanup must not drop the final
+        // segment. No control or UI state is touched by this independent operation.
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                StatsDb(application).use { db ->
+                    db.insert(run.mode, run.level, run.durationMs, run.startedAt)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("VibeStats", "Unable to record completed segment", e)
+            }
         }
     }
 
     // ── Foreground service management ────────────────────
 
-    private fun startPingService(modeLabel: String, speedLabel: String) {
+    private fun startPingService(modeLabel: String, speedLabel: String): Boolean {
         val context = getApplication<Application>()
         val intent = Intent(context, PingForegroundService::class.java).apply {
             action = PingForegroundService.ACTION_UPDATE_STATUS
             putExtra(PingForegroundService.EXTRA_MODE_LABEL, modeLabel)
             putExtra(PingForegroundService.EXTRA_SPEED_LABEL, speedLabel)
         }
-        ContextCompat.startForegroundService(context, intent)
+        return try {
+            ContextCompat.startForegroundService(context, intent)
+            true
+        } catch (e: RuntimeException) {
+            Log.e("VibePingSvc", "Unable to start heartbeat service; ending session", e)
+            false
+        }
     }
 
     private fun stopPingService() {
@@ -374,23 +366,26 @@ class MainViewModel(
      */
     private fun onCrownExit() {
         viewModelScope.launch {
-            _mode.value = AppConstants.MODE_STOP
-            _isVibrating.value = false
-            _statusText.value = "Ready"
-            savedStateHandle[KEY_MODE] = AppConstants.MODE_STOP
+            val shouldMinimize = isInForeground
+            setMode(AppConstants.MODE_STOP)
             stopHeartbeat()
             stopConnectionMonitor()
             stopPingService()
-            _crownExitRequested.value = true
+            _crownExitRequested.value = shouldMinimize
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        stopHeartbeat()
+        minimizeJob?.cancel()
+        recordTransition(AppConstants.MODE_STOP, 0)
+        wearDataLayer.heartbeat.setOwner(PhoneHeartbeat.Owner.NONE)
         stopConnectionMonitor()
         stopPingService()
-        viewModelScope.launch {
+        // viewModelScope is already cancelled at this point. This final STOP
+        // uses a finite, independently bounded transport operation.
+        // Enter sendControl synchronously to stamp STOP before any newer intent.
+        CoroutineScope(Dispatchers.IO).launch(start = CoroutineStart.UNDISPATCHED) {
             wearDataLayer.sendControl(AppConstants.MODE_STOP, 0, 0)
         }
     }

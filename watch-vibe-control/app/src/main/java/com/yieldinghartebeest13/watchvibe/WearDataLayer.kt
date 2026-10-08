@@ -2,143 +2,136 @@ package com.yieldinghartebeest13.watchvibe
 
 import android.util.Log
 import android.content.Context
+import android.os.SystemClock
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.DataClient
 import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.NodeClient
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
-class WearDataLayer(context: Context) {
+class WearDataLayer private constructor(context: Context) {
     private val dataClient: DataClient = Wearable.getDataClient(context)
     private val messageClient: MessageClient = Wearable.getMessageClient(context)
     private val capabilityClient: CapabilityClient = Wearable.getCapabilityClient(context)
     private val nodeClient: NodeClient = Wearable.getNodeClient(context)
 
-    // Session ID changes on every app launch. The watch uses it to detect
-    // fresh sessions: counter reset is expected, auto-resume is suppressed.
-    private val sessionId: Long = System.currentTimeMillis()
-    private var pingCounter: Long = 0
+    // Shared by Activity/ViewModel and every service instance in this process.
+    internal val pingSequence = PingSequence()
+    internal val heartbeat = PhoneHeartbeat()
+    internal var onHeartbeatFailure: (() -> Unit)? = null
 
     // Incoming message listener from watch (crown exit, etc.)
     private var messageListener: MessageClient.OnMessageReceivedListener? = null
 
     companion object {
         private const val TAG = "VibeWearDL"
+        private const val SEND_TIMEOUT_MS = 1_000L
+        @Volatile private var instance: WearDataLayer? = null
+
+        internal fun controlPayload(mode: Int, level: Int, intensity: Int, timestamp: Long, sessionId: Long) =
+            "$mode,$level,$intensity,$timestamp,$sessionId".toByteArray()
+
+        fun getInstance(context: Context): WearDataLayer = instance ?: synchronized(this) {
+            instance ?: WearDataLayer(context.applicationContext).also { instance = it }
+        }
     }
 
     suspend fun sendControl(mode: Int, level: Int, intensity: Int) {
+        // Assign ordering before dispatch: an older active intent must not get
+        // a newer timestamp simply because IO scheduling delayed it past STOP.
+        val ts = pingSequence.nextCommandTimestamp()
+        val sessionId = pingSequence.sessionId
         withContext(Dispatchers.IO) {
-            try {
-                val nodes = nodeClient.connectedNodes.await()
-                Log.d(TAG, "Nodes connected: ${nodes.size}")
-                for (node in nodes) {
-                    Log.d(TAG, "  Node: ${node.displayName} (${node.id})")
-                }
-                if (nodes.isEmpty()) {
-                    Log.w(TAG, "No Wear nodes connected — data won't reach watch!")
-                }
-
-                val ts = System.currentTimeMillis()
-
-                // Send via DataItem with retry
-                retryWithDelay(2, 300) {
-                    val request = PutDataMapRequest.create(AppConstants.PATH_CONTROL).apply {
-                        dataMap.putInt(AppConstants.KEY_MODE, mode)
-                        dataMap.putInt(AppConstants.KEY_LEVEL, level)
-                        dataMap.putInt(AppConstants.KEY_INTENSITY, intensity)
-                        dataMap.putLong(AppConstants.KEY_TIMESTAMP, ts)
-                    }
-                    request.setUrgent()
-                    val result = dataClient.putDataItem(request.asPutDataRequest()).await()
-                    Log.d(TAG, "Sent DataItem: mode=$mode level=$level intensity=$intensity uri=${result.uri}")
-                }
-
-                // Also send via Message API (more reliable for real-time)
-                val payload = "$mode,$level,$intensity,$ts".toByteArray()
-                for (node in nodes) {
+            // STOP must reach the real-time channel even if DataClient hangs.
+            sendIndependentChannels(SEND_TIMEOUT_MS,
+                onFailure = { channel, e -> Log.e(TAG, "Control $channel failed", e) },
+                sendData = {
                     retryWithDelay(2, 300) {
-                        messageClient.sendMessage(node.id, AppConstants.PATH_CONTROL, payload).await()
-                        Log.d(TAG, "Message sent to ${node.displayName}")
+                        val request = PutDataMapRequest.create(AppConstants.PATH_CONTROL).apply {
+                            dataMap.putInt(AppConstants.KEY_MODE, mode)
+                            dataMap.putInt(AppConstants.KEY_LEVEL, level)
+                            dataMap.putInt(AppConstants.KEY_INTENSITY, intensity)
+                            dataMap.putLong(AppConstants.KEY_TIMESTAMP, ts)
+                            dataMap.putLong("sessionId", sessionId)
+                        }
+                        request.setUrgent()
+                        dataClient.putDataItem(request.asPutDataRequest()).await()
+                        Log.d(TAG, "Control DataItem: mode=$mode level=$level ts=$ts sid=$sessionId")
+                    }
+                },
+                sendMessage = {
+                    val nodes = nodeClient.connectedNodes.await()
+                    val payload = controlPayload(mode, level, intensity, ts, sessionId)
+                    for (node in nodes) {
+                        retryWithDelay(2, 300) {
+                            messageClient.sendMessage(node.id, AppConstants.PATH_CONTROL, payload).await()
+                            Log.d(TAG, "Control Message: mode=$mode level=$level ts=$ts sid=$sessionId")
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Send failed after retries", e)
-            }
+            )
         }
     }
 
     suspend fun sendPing() {
         withContext(Dispatchers.IO) {
-            val count = ++pingCounter
+            val count = pingSequence.next()
             val ts = System.currentTimeMillis()
-
-            // Send via DataItem (persistent, survives brief disconnects)
-            try {
-                val request = PutDataMapRequest.create(AppConstants.PATH_PING).apply {
-                    dataMap.putLong("timestamp", ts)
-                    dataMap.putLong("counter", count)
-                    dataMap.putLong("sessionId", sessionId)
-                }
-                request.setUrgent()
-                dataClient.putDataItem(request.asPutDataRequest()).await()
-            } catch (e: Exception) {
-                Log.d(TAG, "Ping DataItem failed: ${e.message}")
-            }
-
-            // Also send via Message (lower latency, real-time channel)
-            try {
-                val nodes = nodeClient.connectedNodes.await()
-                val payload = "$count,$ts,$sessionId".toByteArray()
-                for (node in nodes) {
-                    try {
-                        messageClient.sendMessage(node.id, AppConstants.PATH_PING, payload).await()
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Ping message to ${node.displayName} failed: ${e.message}")
+            val sessionId = pingSequence.sessionId
+            sendIndependentChannels(SEND_TIMEOUT_MS,
+                onFailure = { channel, e -> Log.d(TAG, "Ping $channel failed: ${e.message}") },
+                sendData = {
+                    val request = PutDataMapRequest.create(AppConstants.PATH_PING).apply {
+                        dataMap.putLong("timestamp", ts)
+                        dataMap.putLong("counter", count)
+                        dataMap.putLong("sessionId", sessionId)
+                    }
+                    request.setUrgent()
+                    dataClient.putDataItem(request.asPutDataRequest()).await()
+                },
+                sendMessage = {
+                    val nodes = nodeClient.connectedNodes.await()
+                    val payload = "$count,$ts,$sessionId".toByteArray()
+                    for (node in nodes) {
+                        try {
+                            messageClient.sendMessage(node.id, AppConstants.PATH_PING, payload).await()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Ping message to ${node.displayName} failed: ${e.message}")
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                Log.d(TAG, "Ping message failed: ${e.message}")
-            }
+            )
         }
     }
 
-    suspend fun sendWakeUp() {
-        withContext(Dispatchers.IO) {
-            try {
-                val nodes = nodeClient.connectedNodes.await()
-                for (node in nodes) {
-                    try {
-                        messageClient.sendMessage(node.id, AppConstants.PATH_LAUNCH, ByteArray(0)).await()
-                        Log.d(TAG, "Wake-up sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Wake-up to ${node.displayName} failed", e)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Wake-up failed", e)
-            }
-        }
-    }
+    suspend fun sendWakeUp() = sendMessageToNodes(AppConstants.PATH_LAUNCH, "Wake-up")
+    suspend fun sendMinimize() = sendMessageToNodes(AppConstants.PATH_MINIMIZE, "Minimize")
 
-    suspend fun sendMinimize() {
+    private suspend fun sendMessageToNodes(path: String, label: String) {
         withContext(Dispatchers.IO) {
             try {
-                val nodes = nodeClient.connectedNodes.await()
-                for (node in nodes) {
-                    try {
-                        messageClient.sendMessage(node.id, AppConstants.PATH_MINIMIZE, ByteArray(0)).await()
-                        Log.d(TAG, "Minimize sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Minimize to ${node.displayName} failed", e)
+                val completed = withTimeoutOrNull(2_000L) {
+                    for (node in nodeClient.connectedNodes.await()) {
+                        messageClient.sendMessage(node.id, path, ByteArray(0)).await()
+                        Log.d(TAG, "$label sent to ${node.displayName}")
                     }
-                }
+                    true
+                } ?: false
+                if (!completed) Log.w(TAG, "$label deadline exceeded")
+                Unit
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.d(TAG, "Minimize failed", e)
+                Log.d(TAG, "$label failed", e)
             }
         }
     }
@@ -150,26 +143,9 @@ class WearDataLayer(context: Context) {
         private set
 
     /**
-     * Request the watch to send its current battery level.
-     * The reply arrives via the [startMessageListener] battery callback.
+     * Request the watch's battery; reply is handled by [startMessageListener].
      */
-    suspend fun requestBattery() {
-        withContext(Dispatchers.IO) {
-            try {
-                val nodes = nodeClient.connectedNodes.await()
-                for (node in nodes) {
-                    try {
-                        messageClient.sendMessage(node.id, AppConstants.PATH_BATTERY_REQUEST, ByteArray(0)).await()
-                        Log.d(TAG, "Battery request sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Battery request failed to ${node.displayName}: ${e.message}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Battery request failed: ${e.message}")
-            }
-        }
-    }
+    suspend fun requestBattery() = sendMessageToNodes(AppConstants.PATH_BATTERY_REQUEST, "Battery request")
 
     /**
      * Start listening for messages from the watch.
@@ -180,6 +156,7 @@ class WearDataLayer(context: Context) {
         onBatteryUpdate: (Int) -> Unit = {},
         onWatchAlive: () -> Unit = {}
     ) {
+        stopMessageListener()
         val listener = MessageClient.OnMessageReceivedListener { event ->
             when (event.path) {
                 AppConstants.PATH_CROWN_EXIT -> {
@@ -192,7 +169,7 @@ class WearDataLayer(context: Context) {
                     if (level in 0..100) onBatteryUpdate(level)
                 }
                 AppConstants.PATH_ALIVE -> {
-                    lastWatchAliveMs = System.currentTimeMillis()
+                    lastWatchAliveMs = SystemClock.elapsedRealtime()
                     onWatchAlive()
                 }
                 else -> {
@@ -211,7 +188,7 @@ class WearDataLayer(context: Context) {
      */
     fun isWatchAlive(): Boolean {
         val last = lastWatchAliveMs
-        return last > 0 && System.currentTimeMillis() - last < AppConstants.ALIVE_TIMEOUT_MS
+        return last > 0 && SystemClock.elapsedRealtime() - last < AppConstants.ALIVE_TIMEOUT_MS
     }
     fun stopMessageListener() {
         messageListener?.let {
@@ -224,10 +201,12 @@ class WearDataLayer(context: Context) {
     suspend fun isWearConnected(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                val capInfo = capabilityClient.getCapability(
-                    AppConstants.CAPABILITY_VIBRATION, CapabilityClient.FILTER_REACHABLE
-                ).await()
-                capInfo.nodes.isNotEmpty()
+                withTimeoutOrNull(2_000L) {
+                    capabilityClient.getCapability(AppConstants.CAPABILITY_VIBRATION,
+                        CapabilityClient.FILTER_REACHABLE).await().nodes.isNotEmpty()
+                } ?: false
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Capability check failed", e)
                 false
@@ -244,6 +223,8 @@ class WearDataLayer(context: Context) {
             try {
                 block()
                 return
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (attempt == attempts - 1) throw e
                 Log.w(TAG, "Attempt ${attempt + 1} failed, retrying in ${delayMs}ms: ${e.message}")

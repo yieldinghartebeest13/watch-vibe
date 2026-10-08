@@ -13,6 +13,7 @@ import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -20,6 +21,7 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.google.android.gms.wearable.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
@@ -29,8 +31,8 @@ import kotlinx.coroutines.tasks.await
  *
  * Vibration is now hard-gated on true foreground visibility. If the activity is
  * not started + resumed + window-focused, the runtime is forced inert: leases
- * are cleared, vibration is cancelled, /alive stops, and the phone is told to
- * stop its active session state.
+ * are cleared, vibration is cancelled and /alive stops. A short transient cover
+ * may recover; the phone is told to end its session only after confirmed dismissal.
  */
 open class MainActivity : Activity() {
 
@@ -80,19 +82,22 @@ open class MainActivity : Activity() {
         val level: Int,
         val intensity: Int,
         val timestamp: Long,
-        val source: String
+        val source: String,
+        val sessionId: Long = 0L
     )
 
     protected data class ControlCommandSnapshot(
         val mode: Int,
         val level: Int,
         val intensity: Int,
-        val timestamp: Long
+        val timestamp: Long,
+        val sessionId: Long = 0L
     )
 
     private data class PendingCommandValidation(
         val command: PendingCommand?,
-        val supersedingTimestamp: Long = 0L
+        val supersedingTimestamp: Long = 0L,
+        val supersedingSessionId: Long = 0L
     )
 
     // ── UI ────────────────────────────────────────────────
@@ -120,15 +125,14 @@ open class MainActivity : Activity() {
     // ── Vibration engine ──────────────────────────────────
 
     private lateinit var vibratorEngine: VibratorEngine
-    private val activityScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Play Services Tasks suspend without blocking. Activity/session state and
+    // all Android view/lifecycle effects stay serialized on the main thread.
+    private val activityScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     // ── Dual-lease model (fails-safe) ─────────────────────
 
-    @Volatile private var connectionLeaseExpiry: Long = 0
-    @Volatile private var vibrationLeaseExpiry: Long = 0
-    @Volatile private var lastPingCounter: Long = -1
-    @Volatile private var lastSessionId: Long = 0
-    @Volatile private var lastCommandTimestamp: Long = 0
+    private val session = WatchSessionState()
+    private var exitNotificationSent = false
     private var heartbeatChecker: Job? = null
     @Volatile private var phoneConnected: Boolean = false
     private var minimizeJob: Job? = null
@@ -159,8 +163,12 @@ open class MainActivity : Activity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
         }
-        setTurnScreenOn(true)
         setContentView(R.layout.activity_main)
 
         modeText = findViewById(R.id.modeText)
@@ -193,11 +201,7 @@ open class MainActivity : Activity() {
         isStartedState = true
 
         val filter = IntentFilter(ACTION_MINIMIZE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(minimizeReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(minimizeReceiver, filter)
-        }
+        ContextCompat.registerReceiver(this, minimizeReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         startListeners()
         updateDisplay()
@@ -206,8 +210,6 @@ open class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        emergencyStopJob?.cancel()
-        emergencyStopJob = null
         notificationSettingsLaunchInFlight = false
         isResumedState = true
         refreshForegroundState("onResume")
@@ -220,10 +222,12 @@ open class MainActivity : Activity() {
     }
 
     override fun onStop() {
-        refreshForegroundState("onStop")
         isStartedState = false
         hasWindowFocusState = false
-        stopListeners()
+        refreshForegroundState("onStop")
+        // Keep control listeners until destruction: STOP must still clear
+        // recoverable intent during a short stopped/covered interval. Pings
+        // and actuator work remain foreground-gated; no hidden vibration.
         try { unregisterReceiver(minimizeReceiver) } catch (_: Exception) {}
         super.onStop()
     }
@@ -236,10 +240,7 @@ open class MainActivity : Activity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (minimizeInProgress) {
-            minimizeInProgress = false
-            return
-        }
+        if (minimizeInProgress) return
         if (shouldIgnoreTransientForegroundLossDuringNotificationPermissionPrompt()) {
             emergencyStopJob?.cancel()
             emergencyStopJob = null
@@ -257,7 +258,7 @@ open class MainActivity : Activity() {
         emergencyStopJob?.cancel()
         emergencyStopJob = activityScope.launch {
             delay(EMERGENCY_STOP_GRACE_MS)
-            withContext(Dispatchers.Main) { confirmEmergencyStop() }
+            confirmEmergencyStop()
         }
     }
 
@@ -268,7 +269,7 @@ open class MainActivity : Activity() {
             return
         }
         Log.w(TAG, "User dismissed — EMERGENCY STOP")
-        performEmergencyStop("userLeaveHint", notifyPhone = true)
+        performEmergencyStop("confirmed foreground loss", notifyPhone = true)
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
@@ -298,6 +299,10 @@ open class MainActivity : Activity() {
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy — cleaning up")
+        if (!isChangingConfigurations && (session.desiredCommand != null || exitRequested)) {
+            performEmergencyStop("activity destroyed", notifyPhone = true)
+        }
+        session.endSession()
         heartbeatChecker?.cancel()
         emergencyStopJob?.cancel()
         pendingWakeValidationJob?.cancel()
@@ -356,8 +361,12 @@ open class MainActivity : Activity() {
         wasForegroundState = isForegroundNow
         if (isForegroundNow) {
             Log.d(TAG, "Foreground gate OPEN via $reason")
+            emergencyStopJob?.cancel()
+            emergencyStopJob = null
+            exitRequested = false
             updateDisplay()
             maybeApplyPendingCommand(reason)
+            tryResumeVibration(reason)
             sendAliveToPhone()
         } else {
             Log.w(TAG, "Foreground gate CLOSED via $reason")
@@ -366,43 +375,41 @@ open class MainActivity : Activity() {
     }
 
     private fun handleForegroundLoss(reason: String) {
-        emergencyStopJob?.cancel()
-        emergencyStopJob = null
         pendingWakeValidationJob?.cancel()
         pendingWakeValidationJob = null
         cancelMinimize()
-
-        val now = System.currentTimeMillis()
-        val hadActiveSession = vibratorEngine.vibrating || vibrationLeaseExpiry > now
-        connectionLeaseExpiry = 0
-        vibrationLeaseExpiry = 0
+        val hadActiveSession = session.desiredCommand != null || vibratorEngine.vibrating
+        session.interrupt(currentElapsedRealtime())
         phoneConnected = false
 
         if (vibratorEngine.vibrating) {
             Log.w(TAG, "Stopping vibration because UI is not foreground ($reason)")
             vibratorEngine.cancel()
         }
-
         updateDisplay()
-        if (hadActiveSession) {
-            sendCrownExitToPhone()
+        // Safety cancellation is immediate; session dismissal is not. Focus can
+        // be briefly stolen while the watch Activity remains visibly foreground.
+        if (hadActiveSession && !minimizeInProgress) {
+            exitRequested = true
+            scheduleEmergencyStop()
         }
     }
 
     private fun performEmergencyStop(reason: String, notifyPhone: Boolean) {
         Log.w(TAG, "Emergency stop: $reason")
+        emergencyStopJob?.cancel()
+        emergencyStopJob = null
         pendingWakeValidationJob?.cancel()
         pendingWakeValidationJob = null
         pendingWakeCommand = null
         cancelMinimize()
-        connectionLeaseExpiry = 0
-        vibrationLeaseExpiry = 0
-        lastCommandTimestamp = 0
+        val hadActiveSession = session.desiredCommand != null || vibratorEngine.vibrating
+        session.endSession()
         phoneConnected = false
-        val hadActiveSession = vibratorEngine.vibrating
         vibratorEngine.cancel()
         updateDisplay()
-        if (notifyPhone && (hadActiveSession || exitRequested)) {
+        if (notifyPhone && (hadActiveSession || exitRequested) && !exitNotificationSent) {
+            exitNotificationSent = true
             sendCrownExitToPhone()
         }
         exitRequested = false
@@ -425,8 +432,9 @@ open class MainActivity : Activity() {
         val level = intent.getIntExtra(VibrationDataLayerService.EXTRA_LEVEL, 0)
         val intensity = intent.getIntExtra(VibrationDataLayerService.EXTRA_INTENSITY, 100)
         val ts = intent.getLongExtra(VibrationDataLayerService.EXTRA_TIMESTAMP, 0L)
+        val sid = intent.getLongExtra(VibrationDataLayerService.EXTRA_SESSION_ID, 0L)
 
-        handleControlCommand(mode, level, intensity, ts, "wake-up intent")
+        handleControlCommand(mode, level, intensity, ts, "wake-up intent", sid)
     }
 
     private fun handleControlCommand(
@@ -435,8 +443,13 @@ open class MainActivity : Activity() {
         intensity: Int,
         timestamp: Long,
         source: String,
+        sessionId: Long = 0L,
         onStopHandled: (() -> Unit)? = null
     ) {
+        if (mode !in AppConstants.MODE_CONSTANT..AppConstants.MODE_RANDOM &&
+            mode != AppConstants.MODE_STOP && mode != AppConstants.MODE_PAUSE) return
+        if (session.isRetired(sessionId) || isExpiredCommand(timestamp)) return
+        if (!observePhoneSession(sessionId)) return
         if (isStaleCommand(timestamp)) {
             Log.d(TAG, "Ignoring stale $source command: mode=$mode")
             if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
@@ -449,17 +462,17 @@ open class MainActivity : Activity() {
             pendingWakeValidationJob?.cancel()
             pendingWakeValidationJob = null
             pendingWakeCommand = null
-            if (timestamp > 0) {
-                lastCommandTimestamp = timestamp
-            }
+            emergencyStopJob?.cancel()
+            emergencyStopJob = null
+            exitRequested = false
+            session.acceptCommand(mode, level, intensity, timestamp, currentElapsedRealtime())
             vibratorEngine.setModeVibration(mode, level, intensity)
-            renewLeaseIfActive(mode)
             updateDisplay()
             onStopHandled?.invoke()
             return
         }
 
-        val command = PendingCommand(mode, level, intensity, timestamp, source)
+        val command = PendingCommand(mode, level, intensity, timestamp, source, sessionId)
         if (!isUiForeground()) {
             Log.w(TAG, "Deferring $source command until UI is truly foreground: mode=$mode")
             pendingWakeCommand = command
@@ -477,10 +490,8 @@ open class MainActivity : Activity() {
 
         pendingWakeValidationJob = activityScope.launch {
             val validation = validatePendingCommand(pending)
-            withContext(Dispatchers.Main) {
-                pendingWakeValidationJob = null
-                applyValidatedPendingCommand(pending, validation, reason)
-            }
+            pendingWakeValidationJob = null
+            applyValidatedPendingCommand(pending, validation, reason)
         }
     }
 
@@ -491,19 +502,23 @@ open class MainActivity : Activity() {
         }
 
         val latest = readLatestControlCommandForValidation() ?: return PendingCommandValidation(command = pending)
+        if (session.isRetired(latest.sessionId)) return PendingCommandValidation(command = pending)
         if (!latest.supersedes(pending)) {
             return PendingCommandValidation(command = pending)
         }
-        if (isStaleCommand(latest.timestamp)) {
+        if (isExpiredCommand(latest.timestamp) ||
+            (latest.sessionId == session.sessionId && isStaleCommand(latest.timestamp))) {
             Log.d(TAG, "Dropping deferred command after foreground restore; latest /control snapshot is stale")
-            return PendingCommandValidation(command = null, supersedingTimestamp = latest.timestamp)
+            return PendingCommandValidation(command = null, supersedingTimestamp = latest.timestamp,
+                supersedingSessionId = latest.sessionId)
         }
         if (latest.mode == AppConstants.MODE_STOP || latest.mode == AppConstants.MODE_PAUSE) {
             Log.d(
                 TAG,
                 "Dropping deferred command after foreground restore; superseded by later mode=${latest.mode}"
             )
-            return PendingCommandValidation(command = null, supersedingTimestamp = latest.timestamp)
+            return PendingCommandValidation(command = null, supersedingTimestamp = latest.timestamp,
+                supersedingSessionId = latest.sessionId)
         }
 
         Log.d(TAG, "Refreshing deferred command from latest /control snapshot: mode=${latest.mode}")
@@ -513,7 +528,8 @@ open class MainActivity : Activity() {
                 latest.level,
                 latest.intensity,
                 latest.timestamp,
-                "${pending.source} (revalidated)"
+                "${pending.source} (revalidated)",
+                latest.sessionId
             )
         )
     }
@@ -525,16 +541,25 @@ open class MainActivity : Activity() {
     ) {
         if (!isUiForeground()) return
         if (pendingWakeCommand !== originalPending) return
-        if (validation.supersedingTimestamp > lastCommandTimestamp) {
-            lastCommandTimestamp = validation.supersedingTimestamp
-        }
-
-        val command = validation.command ?: run {
+        if (validation.command == null) {
+            if (!observePhoneSession(validation.supersedingSessionId)) return
+            session.rememberTimestamp(validation.supersedingTimestamp)
+            session.endSession()
+            vibratorEngine.cancel()
             pendingWakeCommand = null
             updateDisplay()
             return
         }
-
+        val command = validation.command
+        if (session.isRetired(command.sessionId) || isExpiredCommand(command.timestamp)) {
+            pendingWakeCommand = null
+            return
+        }
+        if (!observePhoneSession(command.sessionId)) return
+        if (isStaleCommand(command.timestamp)) {
+            pendingWakeCommand = null
+            return
+        }
         if (!ensureEmergencySurfaceAvailable(command)) return
         pendingWakeCommand = null
         Log.d(TAG, "Applying deferred command after foreground restore ($reason): mode=${command.mode}")
@@ -542,7 +567,7 @@ open class MainActivity : Activity() {
     }
 
     private fun ControlCommandSnapshot.supersedes(pending: PendingCommand): Boolean =
-        timestamp > pending.timestamp ||
+        (sessionId > 0L && sessionId != pending.sessionId) || timestamp > pending.timestamp ||
             (timestamp == pending.timestamp && (
                 mode != pending.mode ||
                     level != pending.level ||
@@ -551,15 +576,15 @@ open class MainActivity : Activity() {
 
     private fun applyForegroundCommand(command: PendingCommand) {
         notificationAccessRequired = false
-        if (command.timestamp > 0) {
-            lastCommandTimestamp = command.timestamp
-        }
+        exitNotificationSent = false
+        session.acceptCommand(command.mode, command.level, command.intensity,
+            command.timestamp, currentElapsedRealtime())
         Log.d(
             TAG,
             "Applying ${command.source}: mode=${command.mode} level=${command.level} intensity=${command.intensity}"
         )
+        cancelMinimize()
         vibratorEngine.setModeVibration(command.mode, command.level, command.intensity)
-        renewLeaseIfActive(command.mode)
         updateDisplay()
     }
 
@@ -571,7 +596,7 @@ open class MainActivity : Activity() {
         nowElapsedMs: Long = SystemClock.elapsedRealtime()
     ): Boolean {
         if (!isUiForeground()) return false
-        if (vibrationLeaseExpiry <= System.currentTimeMillis()) return false
+        if (!session.hasVibrationLease(currentElapsedRealtime())) return false
         if (!vibratorEngine.shouldReassertActiveVibration(nowElapsedMs, ACTIVE_VIBRATION_REASSERT_MS)) {
             return false
         }
@@ -587,7 +612,8 @@ open class MainActivity : Activity() {
     // Display + notification
     // ═══════════════════════════════════════════════════════
 
-    private fun updateDisplay() {
+    protected open fun updateDisplay() {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "Watch UI must be updated on the main thread" }
         val mode = vibratorEngine.mode
         val active = vibratorEngine.vibrating
         val connected = isConnected()
@@ -770,6 +796,7 @@ open class MainActivity : Activity() {
     }
 
     protected open fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         requestPermissions(
             arrayOf(Manifest.permission.POST_NOTIFICATIONS),
             POST_NOTIFICATIONS_REQUEST_CODE
@@ -791,7 +818,9 @@ open class MainActivity : Activity() {
 
     protected open suspend fun readLatestControlCommandForValidation(): ControlCommandSnapshot? {
         return try {
-            val items = Wearable.getDataClient(this).getDataItems().await()
+            val items = withTimeoutOrNull(2_000L) {
+                Wearable.getDataClient(this@MainActivity).getDataItems().await()
+            } ?: return null
             try {
                 for (item in items) {
                     if (item.uri.path != AppConstants.PATH_CONTROL) continue
@@ -800,13 +829,16 @@ open class MainActivity : Activity() {
                         mode = map.getInt(AppConstants.KEY_MODE, AppConstants.MODE_PAUSE),
                         level = map.getInt(AppConstants.KEY_LEVEL, 0),
                         intensity = map.getInt(AppConstants.KEY_INTENSITY, 100),
-                        timestamp = map.getLong(AppConstants.KEY_TIMESTAMP, 0L)
+                        timestamp = map.getLong(AppConstants.KEY_TIMESTAMP, 0L),
+                        sessionId = map.getLong("sessionId", 0L)
                     )
                 }
             } finally {
                 items.release()
             }
             null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Failed to read latest control snapshot for validation: ${e.message}")
             null
@@ -853,7 +885,8 @@ open class MainActivity : Activity() {
                             level,
                             intensity,
                             ts,
-                            "DataItem"
+                            "DataItem",
+                            map.getLong("sessionId", 0L)
                         ) {
                             try {
                                 Wearable.getDataClient(this@MainActivity).deleteDataItems(item.uri)
@@ -896,35 +929,9 @@ open class MainActivity : Activity() {
         val listener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
             when (event.path) {
                 AppConstants.PATH_CONTROL -> {
-                    val body = String(event.data)
-                    val parts = body.split(",")
-                    val mode: Int
-                    val level: Int
-                    val intensity: Int
-                    val ts: Long
-                    when (parts.size) {
-                        2 -> {
-                            mode = parts[0].toIntOrNull() ?: return@OnMessageReceivedListener
-                            level = parts[1].toIntOrNull() ?: return@OnMessageReceivedListener
-                            intensity = 100
-                            ts = 0L
-                        }
-                        3 -> {
-                            mode = parts[0].toIntOrNull() ?: return@OnMessageReceivedListener
-                            level = parts[1].toIntOrNull() ?: return@OnMessageReceivedListener
-                            intensity = parts[2].toIntOrNull() ?: 100
-                            ts = 0L
-                        }
-                        4 -> {
-                            mode = parts[0].toIntOrNull() ?: return@OnMessageReceivedListener
-                            level = parts[1].toIntOrNull() ?: return@OnMessageReceivedListener
-                            intensity = parts[2].toIntOrNull() ?: 100
-                            ts = parts[3].toLongOrNull() ?: 0L
-                        }
-                        else -> return@OnMessageReceivedListener
-                    }
-
-                    handleControlCommand(mode, level, intensity, ts, "message")
+                    val command = ControlMessage.decode(event.data) ?: return@OnMessageReceivedListener
+                    handleControlCommand(command.mode, command.level, command.intensity,
+                        command.timestamp, "message", command.sessionId)
                 }
                 AppConstants.PATH_LAUNCH -> {
                     Log.d(TAG, "Launch message from phone — already visible")
@@ -969,7 +976,8 @@ open class MainActivity : Activity() {
             Log.d(TAG, "Capability changed: ${nodes.size} nodes (was=$wasConnected now=$phoneConnected)")
 
             if (phoneConnected && isUiForeground()) {
-                extendLease()
+                // Capability presence is not proof of a flowing heartbeat. Only
+                // a fresh control/ping may renew a vibration lease or recover it.
                 sendAliveToPhone()
                 if (lastBatteryLevel >= 0) {
                     sendBatteryToPhone(lastBatteryLevel)
@@ -978,8 +986,7 @@ open class MainActivity : Activity() {
 
             if (wasConnected && !phoneConnected) {
                 Log.d(TAG, "Phone disconnected → stopping vibration")
-                connectionLeaseExpiry = 0
-                vibrationLeaseExpiry = 0
+                session.interrupt(currentElapsedRealtime())
                 vibratorEngine.cancel()
                 updateDisplay()
             }
@@ -1007,94 +1014,83 @@ open class MainActivity : Activity() {
             while (isActive) {
                 delay(1000)
                 tick++
-                val now = System.currentTimeMillis()
-
                 if (tick % 2 == 0L) {
                     sendAliveToPhone()
                 }
-
-                if (connectionLeaseExpiry > 0 && now > connectionLeaseExpiry) {
-                    Log.w(TAG, "Connection LEASE EXPIRED → cancelling everything")
-                    connectionLeaseExpiry = 0
-                    vibrationLeaseExpiry = 0
-                    val wasVibrating = vibratorEngine.vibrating
-                    if (wasVibrating) {
-                        vibratorEngine.cancel()
-                    }
-                    updateDisplay()
-                    if (!wasVibrating) {
-                        scheduleMinimize()
-                    }
-                }
+                checkConnectionLease()
             }
         }
+    }
+
+    private fun checkConnectionLease() {
+        if (!session.expireConnection(currentElapsedRealtime())) return
+        Log.w(TAG, "Connection LEASE EXPIRED → stopping actuator, preserving bounded recovery")
+        val hadActiveSession = session.desiredCommand != null
+        vibratorEngine.cancel()
+        updateDisplay()
+        if (!hadActiveSession) scheduleMinimize()
     }
 
     private fun extendLease() {
-        if (!isUiForeground()) {
-            Log.w(TAG, "Ignoring lease extension while UI is not foreground")
-            return
-        }
+        if (!isUiForeground()) return
         cancelMinimize()
-        val wasExpired = vibrationLeaseExpiry <= System.currentTimeMillis()
-        val now = System.currentTimeMillis()
-        connectionLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
-        vibrationLeaseExpiry = now + AppConstants.VIBRATION_LEASE_MS
-        if (wasExpired) {
-            val disconnectedMs = if (lastCommandTimestamp > 0) now - lastCommandTimestamp else Long.MAX_VALUE
-            Log.d(TAG, "Vibration lease revived — was expired, now current (disconnected ${disconnectedMs}ms)")
-            if (disconnectedMs < AppConstants.COMMAND_TTL_MS
-                && vibratorEngine.mode != AppConstants.MODE_STOP
-                && vibratorEngine.mode != AppConstants.MODE_PAUSE) {
-                Log.d(TAG, "Auto-resuming vibration")
-                vibratorEngine.setModeVibration(
-                    vibratorEngine.mode, vibratorEngine.level, vibratorEngine.intensity
-                )
-            }
-            updateDisplay()
+        // An arriving ping can beat the monitor tick. Still observe an expired
+        // lease before renewal, rather than hiding a timeout indefinitely.
+        checkConnectionLease()
+        cancelMinimize()
+        session.renewConnection(currentElapsedRealtime())
+        tryResumeVibration("lease renewed")
+        maybeRecoverSilentStop("lease-extend")
+        updateDisplay()
+    }
+
+    private fun tryResumeVibration(reason: String) {
+        if (!isUiForeground() || vibratorEngine.vibrating) return
+        val command = session.recoveryCommand(currentElapsedRealtime()) ?: return
+        if (!canShowEmergencyNotification()) {
+            performEmergencyStop("emergency notification unavailable on recovery", notifyPhone = true)
+            showNotificationAccessRequiredMessage()
             return
         }
-
-        maybeRecoverSilentStop("lease-extend")
+        Log.d(TAG, "Auto-resuming vibration after bounded interruption ($reason)")
+        vibratorEngine.setModeVibration(command.mode, command.level, command.intensity)
+        session.markResumed()
+        updateDisplay()
     }
 
-    private fun handlePing(counter: Long, sessionId: Long): Boolean {
-        if (sessionId > 0 && sessionId != lastSessionId) {
-            Log.d(TAG, "New session detected (sid=$sessionId, was=$lastSessionId) — resetting state")
-            lastSessionId = sessionId
-            lastPingCounter = -1
-            lastCommandTimestamp = 0
+    private fun observePhoneSession(id: Long): Boolean {
+        val previous = session.sessionId
+        return when (session.observeSession(id)) {
+            WatchSessionState.SessionChange.RETIRED -> false
+            WatchSessionState.SessionChange.NEW -> {
+                Log.d(TAG, "New phone session (sid=$id, was=$previous) — ending old session")
+                pendingWakeValidationJob?.cancel()
+                pendingWakeValidationJob = null
+                pendingWakeCommand = null
+                emergencyStopJob?.cancel()
+                emergencyStopJob = null
+                exitRequested = false
+                vibratorEngine.cancel()
+                updateDisplay()
+                true
+            }
+            else -> true
         }
-        if (counter > lastPingCounter) {
-            lastPingCounter = counter
-            return true
-        }
-        return false
     }
+
+    private fun handlePing(counter: Long, sessionId: Long): Boolean =
+        observePhoneSession(sessionId) && session.acceptPing(counter)
 
     protected open fun currentCommandTimeMillis(): Long = System.currentTimeMillis()
+    protected open fun currentElapsedRealtime(): Long = SystemClock.elapsedRealtime()
 
-    private fun isStaleCommand(ts: Long): Boolean {
-        if (ts <= 0) return false
-        val age = currentCommandTimeMillis() - ts
-        if (age > AppConstants.COMMAND_TTL_MS) return true
-        if (ts <= lastCommandTimestamp) return true
-        return false
-    }
+    private fun isExpiredCommand(ts: Long): Boolean =
+        ts > 0L && currentCommandTimeMillis() - ts > AppConstants.COMMAND_TTL_MS
 
-    private fun renewLeaseIfActive(mode: Int) {
-        connectionLeaseExpiry = System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
-        vibrationLeaseExpiry = if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
-            0L
-        } else {
-            cancelMinimize()
-            System.currentTimeMillis() + AppConstants.VIBRATION_LEASE_MS
-        }
-    }
+    private fun isStaleCommand(ts: Long): Boolean =
+        ts > 0L && (isExpiredCommand(ts) || ts <= session.lastCommandTimestamp)
 
-    /** Whether the connection lease is current (pings are flowing). */
-    private fun isConnected(): Boolean =
-        connectionLeaseExpiry > System.currentTimeMillis()
+    private fun isConnected(): Boolean = session.isConnected(currentElapsedRealtime())
 
     // ═══════════════════════════════════════════════════════
     // Battery monitor
@@ -1131,23 +1127,31 @@ open class MainActivity : Activity() {
         batteryReceiver = null
     }
 
-    private fun sendBatteryToPhone(level: Int) {
+    private fun sendBatteryToPhone(level: Int) =
+        sendStatusToPhone(AppConstants.PATH_BATTERY, level.toString().toByteArray(), "Battery")
+
+    /** Bound status traffic so suspended Play Services cannot accumulate jobs. */
+    private fun sendStatusToPhone(path: String, payload: ByteArray, label: String) {
         activityScope.launch {
             try {
-                val nodes = Wearable.getNodeClient(this@MainActivity)
-                    .connectedNodes.await()
-                for (node in nodes) {
-                    try {
-                        val payload = level.toString().toByteArray()
-                        Wearable.getMessageClient(this@MainActivity)
-                            .sendMessage(node.id, AppConstants.PATH_BATTERY, payload).await()
-                        Log.d(TAG, "Battery $level% sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Battery send failed to ${node.displayName}: ${e.message}")
+                withTimeout(2_000L) {
+                    for (node in Wearable.getNodeClient(this@MainActivity).connectedNodes.await()) {
+                        try {
+                            Wearable.getMessageClient(this@MainActivity)
+                                .sendMessage(node.id, path, payload).await()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.d(TAG, "$label send failed: ${e.message}")
+                        }
                     }
                 }
+            } catch (e: TimeoutCancellationException) {
+                Log.d(TAG, "$label deadline exceeded")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.d(TAG, "Battery send failed: ${e.message}")
+                Log.d(TAG, "$label send failed: ${e.message}")
             }
         }
     }
@@ -1159,18 +1163,7 @@ open class MainActivity : Activity() {
     /** Periodic signal that proves this activity is alive and ready for commands. */
     protected open fun sendAliveToPhone() {
         if (!isUiForeground()) return
-        activityScope.launch {
-            try {
-                val nodes = Wearable.getNodeClient(this@MainActivity)
-                    .connectedNodes.await()
-                for (node in nodes) {
-                    Wearable.getMessageClient(this@MainActivity)
-                        .sendMessage(node.id, AppConstants.PATH_ALIVE, ByteArray(0)).await()
-                }
-            } catch (_: Exception) {
-                // Silent — retry on next tick
-            }
-        }
+        sendStatusToPhone(AppConstants.PATH_ALIVE, ByteArray(0), "Alive")
     }
 
     // ═══════════════════════════════════════════════════════
@@ -1178,21 +1171,28 @@ open class MainActivity : Activity() {
     // ═══════════════════════════════════════════════════════
 
     protected open fun sendCrownExitToPhone() {
-        activityScope.launch {
+        // A confirmed dismissal can destroy the Activity immediately. Use only
+        // application context and a bounded sender so cleanup cannot cancel the exit.
+        val context = applicationContext
+        val sender = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        sender.launch {
             try {
-                val nodes = Wearable.getNodeClient(this@MainActivity)
-                    .connectedNodes.await()
-                for (node in nodes) {
-                    try {
-                        Wearable.getMessageClient(this@MainActivity)
+                withTimeout(2_000L) {
+                    val nodes = Wearable.getNodeClient(context).connectedNodes.await()
+                    for (node in nodes) {
+                        Wearable.getMessageClient(context)
                             .sendMessage(node.id, AppConstants.PATH_CROWN_EXIT, ByteArray(0)).await()
                         Log.d(TAG, "Crown exit sent to ${node.displayName}")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to send crown exit to ${node.displayName}: ${e.message}")
                     }
                 }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Crown exit send timed out")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send crown exit: ${e.message}")
+            } finally {
+                sender.cancel()
             }
         }
     }
@@ -1230,6 +1230,10 @@ open class MainActivity : Activity() {
         }
     }
 
+    internal fun checkConnectionLeaseForTesting() = checkConnectionLease()
+    internal fun receivePingForTesting(counter: Long, sessionId: Long) {
+        if (isUiForeground() && handlePing(counter, sessionId)) extendLease()
+    }
     internal fun isVibratingForTesting(): Boolean = vibratorEngine.vibrating
 
     internal fun recoverSilentStopForTesting(nowElapsedMs: Long): Boolean =

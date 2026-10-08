@@ -150,7 +150,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileConstantPulseBackdrop"
@@ -217,7 +217,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileIntermittentPulseBackdrop"
@@ -292,7 +292,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileRampPulseBackdrop"
@@ -359,7 +359,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileBurstPulseBackdrop"
@@ -434,7 +434,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileWavePulseBackdrop"
@@ -501,7 +501,7 @@
                         android:layout_height="56dp"
                         android:layout_gravity="center"
                         android:src="@drawable/ic_dots_circle"
-                        android:tint="#FFFFFF" />
+                        app:tint="#FFFFFF" />
 
                     <View
                         android:id="@+id/tileRandomPulseBackdrop"

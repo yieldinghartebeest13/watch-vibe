@@ -51,6 +51,17 @@ class MainActivityForegroundSafetyTest {
     }
 
     @Test
+    @Config(sdk = [26])
+    fun `minimum supported API can create and register safe minimize receiver`() {
+        // Robolectric does not automatically grant the merged signature permission.
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
+            "${activity.packageName}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION")
+        controller.start().resume().visible()
+        activity.onWindowFocusChanged(true)
+        assertTrue(MainActivity.isUiForegroundForActiveControlWake())
+    }
+
+    @Test
     fun `active command waits for real foreground before vibrating`() {
         controller.start()
         controller.newIntent(activeCommandIntent())
@@ -69,6 +80,24 @@ class MainActivityForegroundSafetyTest {
     }
 
     @Test
+    fun `stopped activity retains STOP delivery and cannot resume the ended mode`() {
+        controller.start().resume().visible()
+        activity.onWindowFocusChanged(true)
+        controller.newIntent(activeCommandIntent(timestamp = activity.commandTimeMillis)
+            .putExtra(VibrationDataLayerService.EXTRA_SESSION_ID, 77L))
+        assertTrue(activity.isVibratingForTesting())
+        controller.pause().stop()
+        assertTrue(activity.listenersActive)
+        controller.newIntent(activeCommandIntent(mode = AppConstants.MODE_STOP,
+            timestamp = activity.commandTimeMillis + 1)
+            .putExtra(VibrationDataLayerService.EXTRA_SESSION_ID, 77L))
+        controller.start().resume()
+        activity.onWindowFocusChanged(true)
+        activity.receivePingForTesting(1, 77L)
+        assertFalse(activity.isVibratingForTesting())
+    }
+
+    @Test
     fun `active control wake flag tracks true foreground lifecycle`() {
         assertFalse(MainActivity.isUiForegroundForActiveControlWake())
 
@@ -83,7 +112,7 @@ class MainActivityForegroundSafetyTest {
     }
 
     @Test
-    fun `losing foreground stops vibration clears notification and notifies phone`() {
+    fun `losing foreground stops actuator immediately and confirms phone exit after grace`() {
         controller.start().resume().visible()
         activity.onWindowFocusChanged(true)
         controller.newIntent(activeCommandIntent())
@@ -95,6 +124,8 @@ class MainActivityForegroundSafetyTest {
 
         assertFalse(activity.isVibratingForTesting())
         assertEquals(0, notificationManager.activeNotifications.size)
+        assertEquals(0, activity.crownExitSignals)
+        shadowOf(Looper.getMainLooper()).idleFor(2_100, TimeUnit.MILLISECONDS)
         assertEquals(1, activity.crownExitSignals)
     }
 
@@ -369,7 +400,7 @@ class MainActivityForegroundSafetyTest {
 
         assertFalse(activity.isVibratingForTesting())
         assertEquals(0, notificationManager.activeNotifications.size)
-        assertEquals(1, activity.crownExitSignals)
+        assertEquals(0, activity.crownExitSignals)
     }
 
     @Test
@@ -414,12 +445,15 @@ class MainActivityForegroundSafetyTest {
     }
 
     class TestMainActivity : MainActivity() {
+        var listenersActive: Boolean = false
         var crownExitSignals: Int = 0
         var reassertSignals: Int = 0
         var notificationPermissionGranted: Boolean = true
         var notificationsEnabled: Boolean = true
         var failActiveNotificationPost: Boolean = false
         var commandTimeMillis: Long = System.currentTimeMillis()
+        var elapsedTimeMillis: Long = android.os.SystemClock.elapsedRealtime()
+        var nonMainDisplayUpdates: Int = 0
         var notificationPermissionRequests: Int = 0
         var notificationSettingsLaunches: Int = 0
         private var latestControlCommandForValidation: ControlCommandSnapshot? = null
@@ -435,9 +469,10 @@ class MainActivityForegroundSafetyTest {
             mode: Int,
             level: Int,
             intensity: Int,
-            timestamp: Long
+            timestamp: Long,
+            sessionId: Long = 0L
         ) {
-            latestControlCommandForValidation = ControlCommandSnapshot(mode, level, intensity, timestamp)
+            latestControlCommandForValidation = ControlCommandSnapshot(mode, level, intensity, timestamp, sessionId)
         }
 
         fun modeLabelText(): String = findViewById<TextView>(R.id.modeText).text.toString()
@@ -446,8 +481,8 @@ class MainActivityForegroundSafetyTest {
 
         fun simulateUserLeaveHintForTesting() = onUserLeaveHint()
 
-        override fun startListeners() = Unit
-        override fun stopListeners() = Unit
+        override fun startListeners() { listenersActive = true }
+        override fun stopListeners() { listenersActive = false }
         override fun startBatteryMonitor() = Unit
         override fun stopBatteryMonitor() = Unit
         override fun sendAliveToPhone() = Unit
@@ -461,6 +496,11 @@ class MainActivityForegroundSafetyTest {
         }
 
         override fun currentCommandTimeMillis(): Long = commandTimeMillis
+        override fun currentElapsedRealtime(): Long = elapsedTimeMillis
+        override fun updateDisplay() {
+            if (Looper.myLooper() != Looper.getMainLooper()) nonMainDisplayUpdates++
+            super.updateDisplay()
+        }
         override fun hasNotificationPermission(): Boolean = notificationPermissionGranted
         override fun areNotificationsEnabledForEmergencySurface(): Boolean = notificationsEnabled
         override fun showActiveNotification(): Boolean =

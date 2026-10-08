@@ -34,7 +34,8 @@ class VibrationDataLayerService : WearableListenerService() {
             val mode: Int,
             val level: Int,
             val intensity: Int,
-            val timestamp: Long
+            val timestamp: Long,
+            val sessionId: Long
         )
 
         private var lastWakeControlCommand: WakeControlCommand? = null
@@ -45,6 +46,7 @@ class VibrationDataLayerService : WearableListenerService() {
         const val EXTRA_LEVEL = "vibe.wake.level"
         const val EXTRA_INTENSITY = "vibe.wake.intensity"
         const val EXTRA_TIMESTAMP = "vibe.wake.timestamp"
+        const val EXTRA_SESSION_ID = "vibe.wake.sessionId"
 
         @Synchronized
         internal fun shouldLaunchForControl(
@@ -52,11 +54,12 @@ class VibrationDataLayerService : WearableListenerService() {
             level: Int,
             intensity: Int,
             timestamp: Long,
-            nowElapsedMs: Long = SystemClock.elapsedRealtime()
+            nowElapsedMs: Long = SystemClock.elapsedRealtime(),
+            sessionId: Long = 0L
         ): Boolean {
             if (timestamp <= 0L) return true
 
-            val command = WakeControlCommand(mode, level, intensity, timestamp)
+            val command = WakeControlCommand(mode, level, intensity, timestamp, sessionId)
             val withinDuplicateWindow =
                 lastWakeControlCommand == command &&
                     nowElapsedMs >= lastWakeControlElapsedMs &&
@@ -77,9 +80,10 @@ class VibrationDataLayerService : WearableListenerService() {
             intensity: Int,
             timestamp: Long,
             activityUiForeground: Boolean = MainActivity.isUiForegroundForActiveControlWake(),
-            nowElapsedMs: Long = SystemClock.elapsedRealtime()
+            nowElapsedMs: Long = SystemClock.elapsedRealtime(),
+            sessionId: Long = 0L
         ): ActiveControlWakeDecision {
-            if (!shouldLaunchForControl(mode, level, intensity, timestamp, nowElapsedMs)) {
+            if (!shouldLaunchForControl(mode, level, intensity, timestamp, nowElapsedMs, sessionId)) {
                 return ActiveControlWakeDecision.SKIP_DUPLICATE
             }
             if (activityUiForeground) {
@@ -101,6 +105,7 @@ class VibrationDataLayerService : WearableListenerService() {
         var launchLevel = 0
         var launchIntensity = 100
         var launchTs = 0L
+        var launchSessionId = 0L
         var hasControl = false
 
         for (event in dataEvents) {
@@ -116,6 +121,7 @@ class VibrationDataLayerService : WearableListenerService() {
                     launchLevel = map.getInt(AppConstants.KEY_LEVEL, 0)
                     launchIntensity = map.getInt(AppConstants.KEY_INTENSITY, 100)
                     launchTs = map.getLong(AppConstants.KEY_TIMESTAMP, 0L)
+                    launchSessionId = map.getLong("sessionId", 0L)
                     hasControl = launchMode != AppConstants.MODE_STOP && launchMode != AppConstants.MODE_PAUSE
                 }
             }
@@ -123,7 +129,8 @@ class VibrationDataLayerService : WearableListenerService() {
         dataEvents.release()
 
         val controlWakeDecision =
-            if (hasControl) decideActiveControlWake(launchMode, launchLevel, launchIntensity, launchTs)
+            if (hasControl) decideActiveControlWake(launchMode, launchLevel, launchIntensity, launchTs,
+                sessionId = launchSessionId)
             else null
         val shouldLaunchControl = controlWakeDecision == ActiveControlWakeDecision.LAUNCH
         if (!hasLaunchPath && !shouldLaunchControl) {
@@ -150,6 +157,7 @@ class VibrationDataLayerService : WearableListenerService() {
                     putExtra(EXTRA_LEVEL, launchLevel)
                     putExtra(EXTRA_INTENSITY, launchIntensity)
                     putExtra(EXTRA_TIMESTAMP, launchTs)
+                    putExtra(EXTRA_SESSION_ID, launchSessionId)
                 }
             } else null)
         }
@@ -162,38 +170,16 @@ class VibrationDataLayerService : WearableListenerService() {
                 startMainActivity(null)
             }
             AppConstants.PATH_CONTROL -> {
-                val body = String(event.data)
-                val parts = body.split(",")
-                val mode: Int
-                val level: Int
-                val intensity: Int
-                val ts: Long
-                when (parts.size) {
-                    2 -> {
-                        mode = parts[0].toIntOrNull() ?: return
-                        level = parts[1].toIntOrNull() ?: return
-                        intensity = 100
-                        ts = 0L
-                    }
-                    3 -> {
-                        mode = parts[0].toIntOrNull() ?: return
-                        level = parts[1].toIntOrNull() ?: return
-                        intensity = parts[2].toIntOrNull() ?: 100
-                        ts = 0L
-                    }
-                    4 -> {
-                        mode = parts[0].toIntOrNull() ?: return
-                        level = parts[1].toIntOrNull() ?: return
-                        intensity = parts[2].toIntOrNull() ?: 100
-                        ts = parts[3].toLongOrNull() ?: 0L
-                    }
-                    else -> return
-                }
+                val command = ControlMessage.decode(event.data) ?: return
+                val mode = command.mode
+                val level = command.level
+                val intensity = command.intensity
+                val ts = command.timestamp
                 if (mode == AppConstants.MODE_STOP || mode == AppConstants.MODE_PAUSE) {
                     Log.d(TAG, "Ignoring wake-up for non-active /control message: mode=$mode")
                     return
                 }
-                when (decideActiveControlWake(mode, level, intensity, ts)) {
+                when (decideActiveControlWake(mode, level, intensity, ts, sessionId = command.sessionId)) {
                     ActiveControlWakeDecision.SKIP_DUPLICATE -> {
                         Log.d(TAG, "Skipping duplicate /control message wake-up: ts=$ts")
                         return
@@ -210,6 +196,7 @@ class VibrationDataLayerService : WearableListenerService() {
                     putExtra(EXTRA_LEVEL, level)
                     putExtra(EXTRA_INTENSITY, intensity)
                     putExtra(EXTRA_TIMESTAMP, ts)
+                    putExtra(EXTRA_SESSION_ID, command.sessionId)
                 })
             }
             else -> {

@@ -1,5 +1,7 @@
 package com.yieldinghartebeest13.watchvibe
 
+import android.content.Context
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -18,6 +20,31 @@ class StatsDbTest {
         val context = RuntimeEnvironment.getApplication()
         context.deleteDatabase("watchvibe_stats.db")
         db = StatsDb(context)
+    }
+
+    @After
+    fun tearDown() { db.close() }
+
+    @Test
+    fun `version one history migrates end timestamps once without losing rows`() {
+        val context = RuntimeEnvironment.getApplication()
+        db.close()
+        context.openOrCreateDatabase("watchvibe_stats.db", Context.MODE_PRIVATE, null).use { legacy ->
+            legacy.execSQL("CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "mode INTEGER NOT NULL, level INTEGER NOT NULL, duration_ms INTEGER NOT NULL, " +
+                "started_at INTEGER NOT NULL)")
+            legacy.execSQL("INSERT INTO sessions VALUES (7, 4, 2, 10000, 100000)")
+            legacy.version = 1
+        }
+        val expected = StatsDb.SessionEntry(7, AppConstants.MODE_WAVE, 2, 10_000, 90_000)
+        db = StatsDb(context)
+        assertEquals(listOf(expected), db.recentSessions())
+        assertEquals(2, db.readableDatabase.version)
+        db.close()
+        db = StatsDb(context)
+        assertEquals(listOf(expected), db.recentSessions())
+        db.insert(AppConstants.MODE_CONSTANT, 0, 1000, 110_000)
+        assertEquals(110_000L, db.recentSessions().first().startedAt)
     }
 
     @Test

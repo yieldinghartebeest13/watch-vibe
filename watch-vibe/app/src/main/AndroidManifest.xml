@@ -13,6 +13,8 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
 
+        <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
+
         <!-- Wake-up service: Play Services starts this to deliver data/messages
              when the app process isn't running. Launches MainActivity directly. -->
         <service

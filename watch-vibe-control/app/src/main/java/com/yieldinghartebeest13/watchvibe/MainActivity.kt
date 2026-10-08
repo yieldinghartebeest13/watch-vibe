@@ -17,8 +17,13 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -34,6 +39,16 @@ class MainActivity : AppCompatActivity() {
     private var unlockedInSession = false
     private var lockRequestInProgress = false
     private var skipNextLock = false
+    private val unlockLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        lockRequestInProgress = false
+        if (result.resultCode == RESULT_OK) {
+            unlockedInSession = true
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) enterAuthenticatedForeground()
+        } else {
+            unlockedInSession = false
+            moveTaskToBack(true)
+        }
+    }
     private lateinit var btnStop: Button
     private lateinit var btnMore: Button
     private lateinit var btnLess: Button
@@ -107,10 +122,13 @@ class MainActivity : AppCompatActivity() {
             null)
     )
 
-    private var uiReady = false
+    private val uiReadyState = MutableStateFlow(false)
+    private val uiReady: Boolean get() = uiReadyState.value
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Register exactly once, not on each authenticated resume.
+        observeViewModel()
 
         // Stealth check — apply FLAG_SECURE early to prevent recents leak,
         // but don't launch LockActivity here. Defer to onResume() to avoid
@@ -130,7 +148,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupUi() {
         if (uiReady) return
-        uiReady = true
         setContentView(R.layout.activity_main)
 
         viewModel = androidx.lifecycle.ViewModelProvider(
@@ -162,7 +179,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         setupListeners()
-        observeViewModel()
+        uiReadyState.value = true
     }
 
     private fun buildTileMap() {
@@ -213,56 +230,36 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeViewModel() {
         lifecycleScope.launch {
-            viewModel.statusText.collectLatest { text -> statusText.text = text }
-        }
-        lifecycleScope.launch {
-            viewModel.watchConnected.collectLatest { connected ->
-                wearStatus.text = if (connected) "Connected" else "No watch connected"
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.watchBatteryLevel.collectLatest { level ->
-                updateBatteryDisplay(level)
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.watchBatteryPending.collectLatest { pending ->
-                // Re-apply display when pending state changes
-                updateBatteryDisplay(viewModel.watchBatteryLevel.value)
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.level.collectLatest { lvl ->
-                speedLabel.text = "Speed: ${AppConstants.SPEED_LABELS[lvl.coerceIn(0, 3)]}"
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.isVibrating.collectLatest { vibrating ->
-                btnStop.isEnabled = vibrating
-                btnStop.backgroundTintList = if (vibrating)
-                    ColorStateList.valueOf(Color.parseColor("#e74c3c"))
-                else
-                    ColorStateList.valueOf(Color.parseColor("#2d3436"))
-                btnStop.setTextColor(if (vibrating) Color.WHITE else Color.parseColor("#777777"))
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.mode.collectLatest { mode -> highlightActiveMode(mode) }
-        }
-        lifecycleScope.launch {
-            viewModel.level.collectLatest { level ->
-                if (currentActiveMode != -1) {
-                    tileMap[currentActiveMode]?.chart?.setPattern(currentActiveMode, level)
-                    startTileAnimation(currentActiveMode, level)
-                }
-            }
-        }
-        lifecycleScope.launch {
-            viewModel.crownExitRequested.collectLatest { requested ->
-                if (requested) {
-                    moveTaskToBack(true)
-                    viewModel.onCrownExitHandled()
-                }
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                uiReadyState.first { it }
+                launch { viewModel.statusText.collectLatest { statusText.text = it } }
+                launch { viewModel.watchConnected.collectLatest {
+                    wearStatus.text = if (it) "Connected" else "No watch connected"
+                } }
+                launch { viewModel.watchBatteryLevel.collectLatest { updateBatteryDisplay(it) } }
+                launch { viewModel.watchBatteryPending.collectLatest {
+                    updateBatteryDisplay(viewModel.watchBatteryLevel.value)
+                } }
+                launch { viewModel.level.collectLatest {
+                    speedLabel.text = "Speed: ${AppConstants.SPEED_LABELS[it.coerceIn(0, 3)]}"
+                    if (currentActiveMode != -1) {
+                        tileMap[currentActiveMode]?.chart?.setPattern(currentActiveMode, it)
+                        startTileAnimation(currentActiveMode, it)
+                    }
+                } }
+                launch { viewModel.isVibrating.collectLatest {
+                    btnStop.isEnabled = it
+                    btnStop.backgroundTintList = ColorStateList.valueOf(
+                        Color.parseColor(if (it) "#e74c3c" else "#2d3436"))
+                    btnStop.setTextColor(if (it) Color.WHITE else Color.parseColor("#777777"))
+                } }
+                launch { viewModel.mode.collectLatest { highlightActiveMode(it) } }
+                launch { viewModel.crownExitRequested.collectLatest {
+                    if (it) {
+                        moveTaskToBack(true)
+                        viewModel.onCrownExitHandled()
+                    }
+                } }
             }
         }
     }
@@ -451,13 +448,14 @@ class MainActivity : AppCompatActivity() {
             mainHandler.postDelayed(this, 16L)
         }
 
-        fun cancel() { cancelled = true }
+        fun cancel() {
+            cancelled = true
+            mainHandler.removeCallbacks(this)
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        if (!uiReady) setupUi()
-
         // Keep FLAG_SECURE in sync with stealth setting
         val prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
         val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
@@ -467,21 +465,30 @@ class MainActivity : AppCompatActivity() {
             window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
 
-        val wasLocking = lockRequestInProgress
-        lockRequestInProgress = false
-        if (wasLocking) {
-            unlockedInSession = true
+        // Resumption, singleTask relaunch and cancellation are not proof of PIN
+        // success. Only LockActivity's explicit RESULT_OK authorizes a new UI.
+        if (lockRequestInProgress) {
+            window.decorView.visibility = View.INVISIBLE
+            return
         }
         if (!unlockedInSession && !skipNextLock) {
             val pinHash = prefs.getString("pin_hash", null)
-            if (stealthEnabled && pinHash != null && !viewModel.isVibrating.value) {
+            val activeSession = ::viewModel.isInitialized && viewModel.isVibrating.value
+            if (stealthEnabled && pinHash != null && !activeSession) {
                 lockRequestInProgress = true
-                startActivity(Intent(this, LockActivity::class.java))
+                window.decorView.visibility = View.INVISIBLE
+                unlockLauncher.launch(Intent(this, LockActivity::class.java))
                 return
             }
             unlockedInSession = true
         }
         skipNextLock = false
+        enterAuthenticatedForeground()
+    }
+
+    private fun enterAuthenticatedForeground() {
+        if (!uiReady) setupUi()
+        window.decorView.visibility = View.VISIBLE
         viewModel.onForeground()
     }
 
@@ -490,7 +497,8 @@ class MainActivity : AppCompatActivity() {
         // Don't call onBackground() when transitioning to the lock screen —
         // the connection hasn't started yet and we don't want to send
         // a spurious /minimize to the watch before the user has even unlocked.
-        if (!lockRequestInProgress) {
+        if (currentActiveMode != -1) stopTileAnimation(currentActiveMode)
+        if (!lockRequestInProgress && ::viewModel.isInitialized) {
             viewModel.onBackground()
         }
     }
@@ -503,14 +511,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         for ((mode, _) in dotAnimators) dotAnimators[mode]?.cancel()
         for ((_, runner) in pulseRunnables) runner.cancel()
         pulseRunnables.clear()
         // Stop vibration and heartbeat when the user explicitly closes the app.
         // modeStop() sends STOP to watch; onCleared() will do final cleanup.
-        viewModel.modeStop()
-        viewModel.stopHeartbeat()
-        viewModel.stopConnectionMonitor()
+        if (isFinishing && !isChangingConfigurations && ::viewModel.isInitialized) {
+            viewModel.modeStop()
+            viewModel.stopHeartbeat()
+            viewModel.stopConnectionMonitor()
+        }
+        super.onDestroy()
     }
 }

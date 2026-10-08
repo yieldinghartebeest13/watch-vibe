@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shared by the tile outline and the chart's bottom-only clip. -->
+    <dimen name="mode_tile_corner_radius">16dp</dimen>
+</resources>

@@ -45,6 +45,16 @@ class VibrationDataLayerServiceTest {
     }
 
     @Test
+    fun `same timestamp in a new session is not a duplicate wake`() {
+        assertTrue(VibrationDataLayerService.shouldLaunchForControl(
+            0, 0, 100, 1234L, nowElapsedMs = 1_000L, sessionId = 10L))
+        assertFalse(VibrationDataLayerService.shouldLaunchForControl(
+            0, 0, 100, 1234L, nowElapsedMs = 1_100L, sessionId = 10L))
+        assertTrue(VibrationDataLayerService.shouldLaunchForControl(
+            0, 0, 100, 1234L, nowElapsedMs = 1_200L, sessionId = 20L))
+    }
+
+    @Test
     fun `same timestamped control can launch again after duplicate window`() {
         assertTrue(
             VibrationDataLayerService.shouldLaunchForControl(

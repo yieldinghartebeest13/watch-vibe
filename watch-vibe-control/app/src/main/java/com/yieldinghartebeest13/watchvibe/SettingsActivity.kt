@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -23,9 +24,11 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var pinStatusText: TextView
     private lateinit var setPinButton: Button
     private lateinit var pinSection: LinearLayout
+    private var pendingStealthEnable = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(R.layout.activity_settings)
 
         prefs = getSharedPreferences("stealth_prefs", MODE_PRIVATE)
@@ -46,25 +49,23 @@ class SettingsActivity : AppCompatActivity() {
 
         // Listeners
         stealthSwitch.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean("stealth_enabled", isChecked).apply()
-            updatePinSection()
             if (isChecked && prefs.getString("pin_hash", null) == null) {
+                // Commit the launcher change only after a PIN is confirmed.
+                pendingStealthEnable = true
+                stealthSwitch.isChecked = false
+                // CompoundButton suppresses reentrant change callbacks.
+                prefs.edit().putBoolean("stealth_enabled", false).apply()
+                updatePinSection()
+                toggleAlias(false)
                 showPinDialog()
             } else {
-                // Pin already set — safe to apply alias change immediately
+                prefs.edit().putBoolean("stealth_enabled", isChecked).apply()
+                updatePinSection()
                 toggleAlias(isChecked)
             }
         }
 
         setPinButton.setOnClickListener { showPinDialog() }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        // Apply any pending alias change (covers the case where pin was
-        // set after stealth was enabled and alias hasn't been toggled yet)
-        val stealthEnabled = prefs.getBoolean("stealth_enabled", false)
-        toggleAlias(stealthEnabled)
     }
 
     private fun toggleAlias(enabled: Boolean) {
@@ -97,15 +98,20 @@ class SettingsActivity : AppCompatActivity() {
             .setTitle("Enter new PIN")
             .setView(pinInput)
             .setPositiveButton("Next", null) // set later to prevent auto-dismiss
-            .setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
+            .setNegativeButton("Cancel") { dialog, _ ->
+                pendingStealthEnable = false
+                dialog.dismiss()
+            }
             .create()
 
+        firstDialog.setOnCancelListener { pendingStealthEnable = false }
+        firstDialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         firstDialog.setOnShowListener {
-            firstDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            firstDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener next@{
                 val pin = pinInput.text.toString()
-                if (pin.length != 4) {
+                if (pin.length != 4 || pin.any { it !in '0'..'9' }) {
                     Toast.makeText(this, "PIN must be 4 digits", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
+                    return@next
                 }
 
                 // Second prompt: Confirm PIN
@@ -119,20 +125,29 @@ class SettingsActivity : AppCompatActivity() {
                     .setTitle("Confirm PIN")
                     .setView(confirmInput)
                     .setPositiveButton("OK", null)
-                    .setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
+                    .setNegativeButton("Cancel") { dialog, _ ->
+                        pendingStealthEnable = false
+                        dialog.dismiss()
+                    }
                     .create()
 
+                secondDialog.setOnCancelListener { pendingStealthEnable = false }
+                secondDialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 secondDialog.setOnShowListener {
-                    secondDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    secondDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener confirm@{
                         val confirmPin = confirmInput.text.toString()
                         if (confirmPin.length != 4) {
                             Toast.makeText(this, "PIN must be 4 digits", Toast.LENGTH_SHORT).show()
-                            return@setOnClickListener
+                            return@confirm
                         }
 
                         if (pin == confirmPin) {
                             val hash = hashPin(pin)
                             prefs.edit().putString("pin_hash", hash).apply()
+                            if (pendingStealthEnable) {
+                                pendingStealthEnable = false
+                                stealthSwitch.isChecked = true
+                            }
                             pinStatusText.text = "••••"
                             setPinButton.text = "Change PIN"
                             firstDialog.dismiss()

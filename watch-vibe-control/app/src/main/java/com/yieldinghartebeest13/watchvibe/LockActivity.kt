@@ -135,6 +135,7 @@ class LockActivity : Activity() {
         val hash = digest.digest(digitRing.toString().toByteArray())
             .joinToString("") { "%02x".format(it) }
         if (hash == storedHash) {
+            setResult(RESULT_OK)
             finish()
         }
     }

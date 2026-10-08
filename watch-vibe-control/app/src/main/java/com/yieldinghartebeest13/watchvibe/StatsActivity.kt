@@ -4,18 +4,20 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.SavedStateViewModelFactory
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 class StatsActivity : AppCompatActivity() {
 
-    private lateinit var viewModel: MainViewModel
+    private lateinit var viewModel: StatsViewModel
     private lateinit var statsSessionCount: TextView
     private lateinit var statsTotalTime: TextView
     private lateinit var statsAvgTime: TextView
@@ -35,12 +37,15 @@ class StatsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (getSharedPreferences("stealth_prefs", MODE_PRIVATE).getBoolean("stealth_enabled", false)) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
         setContentView(R.layout.activity_stats)
 
         viewModel = ViewModelProvider(
             this,
-            SavedStateViewModelFactory(application, this)
-        ).get(MainViewModel::class.java)
+            ViewModelProvider.AndroidViewModelFactory.getInstance(application)
+        ).get(StatsViewModel::class.java)
 
         statsSessionCount = findViewById(R.id.statsSessionCount)
         statsTotalTime = findViewById(R.id.statsTotalTime)
@@ -54,6 +59,10 @@ class StatsActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.statsTabYear).setOnClickListener { selectWindow(2) }
 
         observeStats()
+    }
+
+    override fun onResume() {
+        super.onResume()
         viewModel.refreshStats()
     }
 
@@ -72,21 +81,17 @@ class StatsActivity : AppCompatActivity() {
 
     private fun observeStats() {
         lifecycleScope.launch {
-            viewModel.weeklyStats.collectLatest { if (statsWindow == 0) applyStats() }
-        }
-        lifecycleScope.launch {
-            viewModel.monthlyStats.collectLatest { if (statsWindow == 1) applyStats() }
-        }
-        lifecycleScope.launch {
-            viewModel.yearlyStats.collectLatest { if (statsWindow == 2) applyStats() }
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.stats.collectLatest { applyStats() }
+            }
         }
     }
 
     private fun applyStats() {
         val stats = when (statsWindow) {
-            0 -> viewModel.weeklyStats.value
-            1 -> viewModel.monthlyStats.value
-            2 -> viewModel.yearlyStats.value
+            0 -> viewModel.stats.value.week
+            1 -> viewModel.stats.value.month
+            2 -> viewModel.stats.value.year
             else -> return
         }
 

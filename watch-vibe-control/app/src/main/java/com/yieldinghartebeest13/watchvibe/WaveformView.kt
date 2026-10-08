@@ -16,13 +16,15 @@ class WaveformView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     var mode: Int = -1
+        private set
     var level: Int = 0
+        private set
 
     private var cachedBitmap: Bitmap? = null
 
     private val linePaint = Paint().apply {
         color = Color.argb(100, 255, 255, 255)
-        strokeWidth = 1.5f
+        strokeWidth = 1.5f * resources.displayMetrics.density
         style = Paint.Style.STROKE
         isAntiAlias = true
         strokeCap = Paint.Cap.ROUND
@@ -36,6 +38,7 @@ class WaveformView @JvmOverloads constructor(
     }
 
     fun setPattern(mode: Int, level: Int) {
+        if (this.mode == mode && this.level == level) return
         this.mode = mode
         this.level = level
         cachedBitmap = null // invalidate cache on mode/level change
@@ -65,11 +68,12 @@ class WaveformView @JvmOverloads constructor(
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        // Clip to rounded bottom corners matching tile_bg.xml (radius 16dp ≈ 24px)
-        val radius = 24f
+        // The chart occupies only the bottom strip. Its top edge is square;
+        // bottom corners share the tile's actual density-scaled radius.
+        val radius = resources.getDimension(R.dimen.mode_tile_corner_radius)
         val clipPath = Path()
         clipPath.addRoundRect(0f, 0f, w.toFloat(), h.toFloat(),
-            radius, radius, Path.Direction.CW)
+            floatArrayOf(0f, 0f, 0f, 0f, radius, radius, radius, radius), Path.Direction.CW)
         canvas.clipPath(clipPath)
 
         val cycleW = w / 2f
@@ -89,11 +93,12 @@ class WaveformView @JvmOverloads constructor(
     }
 
     private fun buildCycle(path: Path, w: Float, h: Float) {
+        val topY = h * 0.1f
+        val bottomY = h * 0.8f
         when (mode) {
             AppConstants.MODE_CONSTANT -> {
-                val y = h * 0.2f
-                path.moveTo(0f, y)
-                path.lineTo(w, y)
+                path.moveTo(0f, topY)
+                path.lineTo(w, topY)
             }
             AppConstants.MODE_INTERMITTENT -> {
                 // Waveform shape is speed-independent: always shows the
@@ -102,28 +107,27 @@ class WaveformView @JvmOverloads constructor(
                 val pulseWidth = w / 2f
                 val x2 = pulseWidth * 1.4f
                 path.moveTo(0f, h * 0.6f)
-                path.lineTo(0f, h * 0.1f)
-                path.lineTo(x2, h * 0.1f)
+                path.lineTo(0f, topY)
+                path.lineTo(x2, topY)
                 path.lineTo(x2, h * 0.6f)
                 path.lineTo(w, h * 0.6f)
             }
             AppConstants.MODE_RAMP -> {
                 val steps = 5
-                path.moveTo(0f, h * 0.8f)
+                path.moveTo(0f, bottomY)
                 for (i in 0 until steps) {
                     val x = w * (i + 1) / (steps + 1)
-                    val y = h * (1f - (i + 1).toFloat() / steps) * 0.7f + h * 0.1f
+                    val y = topY + (1f - (i + 1).toFloat() / steps) * (bottomY - topY)
                     path.lineTo(x, y)
                 }
-                path.lineTo(w, h * 0.8f)
+                path.lineTo(w, bottomY)
             }
             AppConstants.MODE_BURST -> {
                 val numTaps = 3
                 val activeWidth = w * 0.7f
                 val pairWidth = activeWidth / numTaps
                 val tapWidth = pairWidth * 0.5f
-                val baseY = h * 0.8f
-                val topY = h * 0.1f
+                val baseY = bottomY
 
                 path.moveTo(0f, baseY)
                 for (i in 0 until numTaps) {
@@ -141,7 +145,8 @@ class WaveformView @JvmOverloads constructor(
                 for (i in 0..samples) {
                     val x = w * i / samples
                     val angle = -Math.PI / 2 + i * 2.0 * Math.PI / samples
-                    val y = (-Math.sin(angle) * h * 0.35f + h / 2f).toFloat()
+                    val y = (-Math.sin(angle) * (bottomY - topY) / 2f +
+                        (topY + bottomY) / 2f).toFloat()
                     if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
             }

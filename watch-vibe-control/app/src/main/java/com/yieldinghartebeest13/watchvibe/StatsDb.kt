@@ -4,11 +4,13 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class StatsDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+// Older supported Android releases expose close() but SQLiteOpenHelper does
+// not implement AutoCloseable there. Explicit Closeable makes use {} portable.
+class StatsDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION), java.io.Closeable {
 
     companion object {
         private const val DB_NAME = "watchvibe_stats.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         // Sessions: runs < 15 min apart are merged into one session.
         const val MERGE_GAP_MS = 15 * 60_000L
@@ -30,7 +32,13 @@ class StatsDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VE
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2 && newVersion >= 2) {
+            // v1's control ViewModel passed the end time into started_at. Convert
+            // in place without dropping IDs, modes, durations, or history rows.
+            db.execSQL("UPDATE sessions SET started_at = started_at - duration_ms")
+        }
+    }
 
     fun insert(mode: Int, level: Int, durationMs: Long, startedAt: Long) {
         writableDatabase.execSQL(
@@ -166,7 +174,7 @@ class StatsDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VE
     }
 
     private fun buildSession(runs: List<SessionEntry>): MergedSession {
-        var activeMs = runs.sumOf { it.durationMs }
+        val activeMs = runs.sumOf { it.durationMs }
         var totalMs = activeMs
 
         // Add gaps <= SHORT_PAUSE_MS

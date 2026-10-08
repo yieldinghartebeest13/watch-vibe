@@ -109,29 +109,22 @@ class VibratorEngine(
         // 2. Cancel via individual Vibrator
         try { vibrator.cancel() } catch (_: Exception) {}
 
-        // 3. Flush the alarm-class pipeline with a zero-amplitude effect.
-        //    Our vibrate() uses USAGE_ALARM which routes to a separate
-        //    pipeline on Wear OS. Sending a 1ms/amplitude-0 effect with
-        //    the SAME usage class flushes that pipeline and kills the
-        //    looping waveform. Without this, cancel() appears to work
-        //    initially but fails after the effect has been running a while.
+        // 3. Best-effort silent replacement in the alarm-class pipeline.
+        //    OneShot rejects amplitude 0; an all-off waveform is valid.
+        //    Manager/individual cancellation above remain the primary stop.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
                 vibrator.vibrate(
-                    VibrationEffect.createOneShot(1, 0),
+                    VibrationEffect.createWaveform(longArrayOf(1), intArrayOf(0), -1),
                     VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM)
                 )
             } catch (_: Exception) {}
         }
 
-        // 4. Flush the default pipeline too.
-        //    On Wear OS 5+ this covers the case where the HAL has taken
-        //    ownership of the effect and the ALARM-path flush alone is not enough.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                vibrator.vibrate(VibrationEffect.createOneShot(1, 0))
-            } catch (_: Exception) {}
-        }
+        // 4. Best-effort silent replacement in the default pipeline, too.
+        try {
+            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(1), intArrayOf(0), -1))
+        } catch (_: Exception) {}
     }
 
     /**
