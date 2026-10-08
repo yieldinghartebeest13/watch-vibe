@@ -4,7 +4,7 @@ Two companion apps that control a watch's vibration motor from your phone.
 
 ---
 
-## Architecture (v4 — Foreground Gate + Emergency Surface + Silent-Stop Recovery)
+## Architecture (v6 — Isolated Runtime, Statistics, and Authentication)
 
 ```
 ┌──────────────────────────────────────────┐     ┌────────────────────────────────────┐
@@ -22,7 +22,7 @@ Two companion apps that control a watch's vibration motor from your phone.
 │  ┌──────────▼─────────────────────────┐  │     │  └──────────────────────────────┘  │
 │  │ MainViewModel                      │  │     │                                    │
 │  │  mode, level (SavedStateHandle)    │  │     │  ┌──────────────────────────────┐  │
-│  │  Heartbeat (mode-aware, bg-safe)   │  │     │  │ VibrationDataLayerService    │  │
+│  │  Heartbeat (idle foreground only) │  │     │  │ VibrationDataLayerService    │  │
 │  │  CapabilityClient.addListener      │  │     │  │  Wake-up only → launches Act. │  │
 │  └──────────┬─────────────────────────┘  │     │  └──────────────────────────────┘  │
 │             │                            │     │                                    │
@@ -56,7 +56,8 @@ Two companion apps that control a watch's vibration motor from your phone.
 | Phone (WatchVibeControl) | `com.yieldinghartebeest13.watchvibe` |
 | Watch (WatchVibe) | `com.yieldinghartebeest13.watchvibe` |
 
-Play Services routes data layer items by package name. Different IDs = data silently dropped.
+Play Services requires matching package names and signing certificates on the two
+apps. Build/sign both together; different identities prevent Data Layer delivery.
 
 ### 2. Amplitude-based vibration engine
 
@@ -65,10 +66,13 @@ values (0-255). The motor transitions smoothly between amplitude levels rather t
 binary on/off clicking. Burst mode uses a 50ms minimum tap duration to prevent
 motor artifacts at very short timings, keeping its base cycle at 1000ms.
 
-### 3. No command ordering — dedup plus forced reassert
+### 3. Ordered controls — dedup plus forced reassert
 
-Every command is processed immediately. `VibratorEngine.setModeVibration()` still
-uses a dedup guard for ordinary repeated callbacks:
+The phone stamps controls before IO dispatch, with a process-wide monotonically
+increasing timestamp even for same-millisecond taps. The watch rejects stale or
+out-of-order controls before applying them; active commands also need true
+foreground visibility. `VibratorEngine.setModeVibration()` then uses a dedup
+guard for ordinary repeated callbacks:
 ```kotlin
 if (mode == currentMode && level == currentLevel && intensity == currentIntensity && isActive) return
 ```
@@ -95,12 +99,17 @@ Reassertion is **cycle-aware**:
 
 ### 4. Dual-lease model (dead-man's switch)
 
+`WatchSessionState` owns desired vibration separately from the actuator state.
+Activity/session/UI effects are serialized on `Dispatchers.Main.immediate`;
+Play Services Tasks suspend without blocking. Lease/recovery clocks use
+`SystemClock.elapsedRealtime()` rather than wall time.
+
 Two independent renewable leases replace a single timeout:
 
 | Lease | Extended by | Zeroed by | Drives |
 |-------|------------|-----------|--------|
-| **connectionLease** | pings, any control command, capability reconnect | disconnect, natural expiry | UI status, notification text |
-| **vibrationLease** | pings, non-STOP commands | STOP/PAUSE commands, disconnect, connection expiry | vibration cancellation, auto-resume |
+| **connectionLease** | fresh pings, accepted controls | disconnect, foreground loss, natural expiry | UI status |
+| **vibrationLease** | fresh pings while a mode is desired, non-STOP commands | STOP/PAUSE, disconnect, foreground loss, connection expiry | cancellation, bounded recovery |
 
 Phone pings `/ping` every 1s via both DataClient and MessageClient (dual-transport
 redundancy). Each ping extends both leases by `VIBRATION_LEASE_MS` (3s).
@@ -112,13 +121,14 @@ shows "Ready" (connected, not vibrating) instead of "Waiting..." (disconnected).
 1. **CapabilityClient listener** → fast-path: zeroes both leases and cancels
    vibration immediately when the phone node disappears. Sub-second reaction.
 2. **Connection lease expiry** → safety net: if the capability listener doesn't
-   fire (silent disconnect), the lease expires in 3s, both leases zeroed,
-   vibration cancelled. This is **fails-safe by design** — if the heartbeat
-   mechanism breaks entirely, vibration stops within 3 seconds.
+   fire (silent disconnect), the lease expires in 3s and the actuator stops on
+   the next one-second monitor tick (or arriving ping). Capability/focus loss
+   cancels immediately. This is **fails-safe by design**.
 
-**Auto-resume**: when the vibration lease revives from expired (pings resume),
-the watch restarts the last active mode — but only if the disconnect was
-shorter than `COMMAND_TTL_MS` (30s). Longer disconnects suppress auto-resume.
+**Auto-resume**: fresh pings can revive the separately stored desired mode if
+actual monotonic interruption age is strictly less than `COMMAND_TTL_MS` (30s),
+the UI is foreground, and the emergency surface is available. STOP, confirmed
+dismissal, a new phone session, or the recovery deadline clears desired mode.
 
 The UI, notification, and vibration control are all bounded by the same lease
 model, but actual vibration is additionally constrained by the **foreground
@@ -128,9 +138,11 @@ cancels vibration instead of continuing unattended.
 
 ### 5. Command TTL and deduplication
 
-Every control command carries a `System.currentTimeMillis()` timestamp. The
-watch discards any command older than `COMMAND_TTL_MS` (30s) or older than
-the last processed command (out-of-order delivery).
+Every control command carries a wall-clock-based timestamp, strictly increasing
+within the phone process and assigned before transport scheduling. Cleanup STOP
+also enters the sender synchronously before newer UI intents can be issued.
+The watch discards controls older than `COMMAND_TTL_MS` (30s), or at/below the
+current Activity session's command watermark (duplicate/out-of-order delivery).
 
 This prevents two problems:
 - **Stale re-delivery**: a cached DataItem from a long-ago tap doesn't
@@ -145,25 +157,26 @@ Messages have no queue — they fail fast if the node is unreachable.
 
 ### 6. Session ID (cross-session isolation)
 
-Every ping carries a `sessionId` (phone-side `System.currentTimeMillis()` at
-`WearDataLayer` construction — i.e. every app launch). The watch tracks
-`lastSessionId`.
+Every ping/control carries a `sessionId` created once by the application-scoped
+`WearDataLayer`. The ViewModel and service instances share this identity and an
+atomic counter. Control Messages append ID as a fifth field; the updated watch
+still accepts old two/three/four-field commands. Update both apps together.
 
-When the watch detects a new session:
-- Resets `lastPingCounter` to -1 — the new session's counter starts from 0,
-  which would otherwise be rejected by the old `> lastPingCounter` check.
-- Resets `lastCommandTimestamp` to 0 — suppresses auto-resume. A fresh phone
-  session should never restart the previous session's vibration.
+A new identified session clears old desired mode/recovery, cancels the actuator,
+and resets counter/command watermark. The old ID is retired so late deliveries
+cannot switch back. First identification preserves a just-received legacy command.
+STOP/emergency exit retain the watermark to suppress cached active redelivery.
 
 This also fixes the phone close/reopen problem: without sessionId, the
 resetting `pingCounter` caused all new-session pings to be silently dropped.
 
 ### 7. Phone state persistence
 
-`MainViewModel` uses `SavedStateHandle` to persist `mode` and `level` across
-process death. When Android kills the background process and recreates it,
-the UI restores the last active tile and re-sends the command to the watch
-(the watch's dedup guard handles the already-active case).
+`MainViewModel` uses `SavedStateHandle` to persist validated mode, level, and
+intensity selections. Construction never starts vibration. A restored active
+selection is applied only from authenticated `onForeground()`, after any PIN
+gate. Foreground-service start/promotion rejection stops the session rather than
+leaving an active UI without a heartbeat.
 
 The watch `MainActivity` uses `launchMode="singleTask"` to avoid stale hidden
 instances when Play Services or the phone relaunches the watch UI. The watch
@@ -171,10 +184,18 @@ app still has **no launcher entry** in disguise mode; `singleTask` is purely a
 task/lifecycle safety measure so wake-ups reuse the existing task instead of
 leaving an older hidden instance behind.
 
-### 8. Background heartbeat policy
+### 8. Single-owner heartbeat policy
 
-The heartbeat is mode-aware — it only runs in the background when protecting
-an active vibration:
+`PhoneHeartbeat` serializes ownership handoff and cancellation. The service is
+the only active-mode owner, even with the phone UI foreground; the ViewModel
+only sends idle foreground status pings. DataClient/MessageClient operations
+have independent one-second deadlines and propagate parent cancellation.
+
+`PingForegroundService` renews a bounded 60-second partial wake lock every
+30 seconds in a separate maintenance coroutine. It is non-sticky and rejects
+delayed starts after STOP; Android cannot restart an orphan active heartbeat.
+
+The heartbeat only runs in the background when protecting active vibration:
 
 | App state | Mode active? | Heartbeat | Reason |
 |-----------|-------------|-----------|--------|
@@ -184,11 +205,10 @@ an active vibration:
 | Background | No (STOP) | ❌ Stopped | Battery — nothing to protect |
 | Explicitly closed | Any | ❌ Stopped | Process killed or finishing |
 
-`onPause()` no longer unconditionally stops the heartbeat. Instead,
-`onBackground()` checks the current mode — if a vibration is active,
-the heartbeat keeps running even with the screen off or the app switched
-out. When the user stops vibration while backgrounded, the heartbeat stops
-to save battery.
+`onBackground()` stops idle status pings but leaves service-owned active pings
+running. STOP/PAUSE releases ownership and stops the service. Phone Activity
+configuration recreation does not send STOP. ViewModel cleanup sends its final
+STOP using a bounded independent operation because its own scope is cancelled.
 
 ### 9. Auto-start on watch
 
@@ -217,7 +237,7 @@ the user doesn't have to manually long-press the crown to dismiss the watch UI.
 
 | Trigger | Delay | Cancel condition |
 |---------|-------|------------------|
-| Phone `onBackground()` + mode is STOP/PAUSE | Immediate | — |
+| Phone `onBackground()` + mode is STOP/PAUSE | Immediate | Foreground return or a new active command cancels an in-flight send |
 | Connection lease expiry + not vibrating | 30 seconds | Ping arrives or vibration command received |
 
 The 30s grace period on lease expiry prevents brief Bluetooth dropouts from
@@ -248,7 +268,11 @@ If that condition becomes false:
 - vibration is cancelled
 - `/alive` stops
 - ping-based lease extension is ignored
-- the watch sends `/crown_exit` if there was an active session
+- control listeners remain registered until destruction so STOP/PAUSE can
+  clear recovery even during a short stopped interval
+- desired mode remains recoverable briefly, but `/crown_exit` is not sent yet
+- sustained loss is confirmed after two seconds; returning focus still needs a
+  renewed lease before vibration can resume
 
 This closes the previous bug where a hidden Activity could keep working after
 `onStop()` because its runtime had been started in `onCreate()` and only mostly
@@ -262,8 +286,11 @@ cancels vibration immediately. Instead:
 3. `confirmEmergencyStop()` checks `isUiForeground()`
    - foreground restored → transient cover/keyguard, abort
    - still not foreground → `performEmergencyStop(...)`
-4. `performEmergencyStop(...)` clears leases, cancels vibration, updates UI,
-   and sends `/crown_exit` when appropriate
+4. `performEmergencyStop(...)` clears desired recovery/leases, cancels vibration,
+   updates UI, and sends `/crown_exit` at most once per ended session
+
+Foreground loss uses this same confirmation instead of bypassing it. A bounded
+application-context sender survives immediate Activity destruction.
 
 #### Notification emergency surface
 While vibration is active **and** the UI is truly foreground, the watch shows an
@@ -329,10 +356,13 @@ The phone app records every vibration run and provides aggregated stats
 on a dedicated stats screen.
 
 **Recording:**
-- Session start/end tracked in `MainViewModel.applyVibration()` via
-  `_isVibrating` transitions
-- Runs shorter than 500ms are discarded as accidental taps
-- Rows inserted into SQLite via raw `SQLiteOpenHelper` (no Room dependency)
+- `SessionRecorder` closes a segment on each mode/speed change, STOP, or cleanup
+- Duration uses monotonic elapsed time; `started_at` stores the actual wall-clock start
+- Identical commands do not split segments; runs shorter than 500ms are discarded
+- Finite independent IO writes survive ViewModel cleanup, using scoped DB handles
+- `StatsDb` explicitly implements `Closeable` for older supported Android versions
+- Schema v2 converts v1's recorded end timestamps to approximate starts in place;
+  IDs, modes, durations, and history rows are retained (no Room dependency)
 
 **Session merging (StatsDb.mergedQuery):**
 - Consecutive runs ≤ 15 minutes apart are merged into one session
@@ -346,8 +376,12 @@ on a dedicated stats screen.
 - Week / Month / Year tabs with three summary cards (sessions, time, avg)
 - Colored mode breakdown bars proportional to usage
 - Recent sessions list with mode-colored dots, run counts, and durations
-- Uses `suppressMinimize` flag to prevent watch dismissal when opening
-  the stats screen (internal activity transition)
+- Owns a read-only `StatsViewModel`, not the transport-owning `MainViewModel`;
+  closing this screen cannot issue STOP, replace listeners, or alter heartbeat ownership
+- Refreshes a single week/month/year snapshot on resume; queries run on IO and
+  the helper closes on the querying thread
+- Uses `suppressMinimize` to avoid watch dismissal on this internal transition
+- UI collectors are lifecycle-gated; stealth statistics also use `FLAG_SECURE`
 
 ### 14. No foreground service — vibration is activity-scoped and foreground-gated
 
@@ -422,9 +456,17 @@ launches `LockActivity` from `onResume()`. Without a guard, the subsequent
 `/minimize` to the watch and performs unnecessary background cleanup —
 all before the user has even unlocked.
 
-`onPause()` now checks `lockRequestInProgress` and skips `onBackground()`
-when transitioning to the lock screen. `onForeground()` is called only
-after the user unlocks, starting the connection once.
+`LockActivity` returns `RESULT_OK` only after a matching PIN. MainActivity uses
+Activity Result APIs; resumption, cancellation, or a singleTask relaunch never
+counts as authentication. Control UI construction/foreground activation waits
+for authorization, and the decor stays hidden while locking. An already
+running authorized vibration retains the existing immediate-access STOP policy.
+
+`onPause()` skips background handling during the initial lock transition and
+safely handles an uninitialized ViewModel. UI collectors are registered once in
+`onCreate`, wait for UI readiness, and run only while resumed; tile timers stop
+on pause. Stealth aliases/preferences are committed only after PIN confirmation,
+not during destruction or after a cancelled PIN dialog.
 
 ---
 
@@ -447,13 +489,17 @@ range as speed increases instead of trying to preserve a fixed cycle length.
 
 ---
 
-## Cancel Mechanism (4-stage)
+## Actuator cancellation
 
-1. `VibratorManager.cancel()` — cancel ALL vibrators (API 31+)
-2. `Vibrator.cancel()` — cancel default vibrator
-3. Zero-amplitude one-shot with `USAGE_ALARM` — flush alarm pipeline
-4. Zero-amplitude one-shot default — flush default pipeline
-5. Delete STOP DataItems from Data Layer to prevent stale re-delivery
+1. `VibratorManager.cancel()` — cancel all vibrators (API 31+)
+2. `Vibrator.cancel()` — cancel the default vibrator
+3. Silent non-repeating waveform with `USAGE_ALARM` — best-effort replacement
+4. Silent non-repeating waveform in the default pipeline — best-effort replacement
+
+The silent waveform is `[1ms at amplitude 0]`; a zero-amplitude OneShot is
+invalid and previously threw a swallowed exception. Hardware flush behavior
+still requires device validation. STOP DataItems are separately removed after
+handling; command/recovery watermarks are Activity-scoped, not durable tombstones.
 
 ---
 
@@ -481,9 +527,14 @@ Tiles are arranged in a 3-column × 2-row grid: Constant, Intermittent, Ramp on 
 first row, Wave, Burst, Random on the second. Random mode has no waveform chart
 (because random patterns look like noise in a static chart).
 
-Active tile: rotating white dots + pulsing center button that traces the actual
-vibration waveform shape (3 pulses for Burst, sine for Wave, staircase for Ramp, etc.).
-Tap active tile again = stop.
+Active tile: rotating white dots + a pulsing center that illustrates the mode's
+envelope (3 pulses for Burst, sine for Wave, rising Ramp, etc.), not HAL telemetry.
+Tap active tile again = stop. UI collectors and pulse/dot animation callbacks stop
+when the screen pauses; the foreground service continues an authorized active session.
+
+Charts share amplitude bounds (10% to 80% of height), so Constant reaches the same
+peak as Wave. A shared 16dp resource clips only chart bottom corners, matching the
+tile radius at each density while keeping the chart's top edge square.
 
 ---
 
@@ -527,9 +578,9 @@ The Activity still renders above the keyguard via `setShowWhenLocked(true)`.
 | Vibration lease | Extended by pings; zeroed by STOP; drives auto-resume | — |
 | UI connection status | Derived from connectionLease (`connectionLeaseExpiry > now`) | — |
 | Command TTL | Discards commands older than 30s or out-of-order | Commands carry timestamps |
-| Session ID | Resets counter baseline, suppresses cross-session auto-resume | Generated each app launch |
-| State persistence | SavedStateHandle restores mode/level after process death | singleTask launch mode |
-| Background heartbeat | Mode-aware: runs in background only when vibration active | onBackground() checks mode |
+| Session ID | Resets counter baseline, rejects retired IDs within the Activity | Shared once per phone process |
+| State persistence | Desired vibration is not persisted | SavedStateHandle restores selections; activation waits for authenticated foreground |
+| Background heartbeat | Hidden watch ignores lease renewal | Service owns active heartbeats; idle foreground pings belong to ViewModel |
 | Wake-up | DataLayerService launches Activity | Phone sends /launch on open |
 | Auto-minimize | Lease-expiry (30s delay) + phone-background (immediate) when idle | Phone sends /minimize on background |
 | Emergency stop | Watch sends /crown_exit on dismiss; phone minimizes | Phone listens for /crown_exit, resets UI |
@@ -546,11 +597,17 @@ app/src/main/
 ├── AndroidManifest.xml
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt       # Shared constants (identical in both projects)
-│   ├── WearDataLayer.kt      # DataClient + MessageClient + CapabilityClient + battery request
-│   ├── MainViewModel.kt      # State + heartbeat + SavedStateHandle + watchBatteryLevel + stats
-│   ├── MainActivity.kt       # 6-tile UI + waveform animations + controls
-│   ├── StatsActivity.kt      # Session history and aggregated stats
-│   ├── StatsDb.kt            # SQLite session storage with session merging
+│   ├── WearDataLayer.kt      # Shared transport/session + bounded independent channels
+│   ├── PhoneHeartbeat.kt     # Ownership, atomic counter, wake-lock renewal
+│   ├── PingForegroundService.kt # Sole active heartbeat owner
+│   ├── MainViewModel.kt      # Control state, ownership, validated saved selections
+│   ├── MainActivity.kt       # Authenticated 6-tile UI + lifecycle-bound animations
+│   ├── SessionRecorder.kt    # Monotonic duration, mode/speed segments
+│   ├── StatsActivity.kt      # Read-only history screen
+│   ├── StatsViewModel.kt     # IO-backed statistics snapshots, no transport ownership
+│   ├── StatsDb.kt            # Versioned SQLite storage with session merging
+│   ├── LockActivity.kt       # Calculator with explicit authenticated result
+│   ├── SettingsActivity.kt   # Confirmed PIN and launcher configuration
 │   └── WaveformView.kt       # Mini waveform chart per tile (bitmap-cached)
 └── res/
     ├── layout/activity_main.xml
@@ -570,6 +627,8 @@ app/src/main/
 ├── java/com/yieldinghartebeest13/watchvibe/
 │   ├── AppConstants.kt            # Shared constants (identical in both projects)
 │   ├── VibratorEngine.kt          # 6 modes, amplitude API, cycle-aware reassert
+│   ├── WatchSessionState.kt       # Monotonic leases + desired-mode recovery
+│   ├── ControlMessage.kt          # Shared legacy/new message decoder
 │   ├── VibrationDataLayerService.kt  # Wake dedupe + foreground-aware MainActivity launch
 │   └── MainActivity.kt               # Kiosk mode + foreground gate + notification safety
 └── res/
@@ -581,10 +640,21 @@ app/src/main/
 
 ## Building & Running
 
-### Setup
+### Local verification setup
 ```bash
-source .env   # ANDROID_HOME, JAVA_HOME, WEAR_SERIAL, PHONE_SERIAL
+export JAVA_HOME=/home/v/.sdkman/candidates/java/21.0.9-tem
+export ANDROID_HOME=/home/v/Android/Sdk
+export PATH="$JAVA_HOME/bin:$PATH"
 ```
+
+Do **not** source `.env`: it is Make configuration and may contain shell-sensitive
+credential values. For local verification, invoke Gradle directly in each app
+root with `--no-daemon --max-workers=2 testDebugUnitTest lintDebug lintRelease
+assembleDebug assembleRelease`. Release APKs from these tasks are unsigned; signing and device
+installation are separate operations.
+
+See [project review](docs/project-review.md) and
+[stop investigation](docs/unexpected-stop-investigation.md) for evidence and limits.
 
 ### Build
 ```bash
